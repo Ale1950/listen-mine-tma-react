@@ -45,7 +45,7 @@ let currentMiner: Miner | null = null;
 // ═══ Initialize WASM (call once) ═══
 export async function initBeeSDK(): Promise<void> {
   if (wasmInitialized) return;
-  await init({ module_or_path: '/listen-mine-tma/bee_sdk_bg.wasm' });
+  await init({ module_or_path: '/listen-mine-tma-react/bee_sdk_bg.wasm' });
   wasmInitialized = true;
 }
 
