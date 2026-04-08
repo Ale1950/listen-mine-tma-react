@@ -1,0 +1,183 @@
+{
+	"ABI version": 2,
+	"version": "2.4",
+	"header": ["pubkey", "time", "expire"],
+	"functions": [
+		{
+			"name": "constructor",
+			"inputs": [
+				{"name":"reward_adjustment","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "popCoinRootDestroyed",
+			"inputs": [
+				{"name":"name","type":"string"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setNewCode",
+			"inputs": [
+				{"name":"id","type":"uint8"},
+				{"name":"code","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "destroyNode",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "sendTapRewards",
+			"inputs": [
+				{"name":"name","type":"string"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "sendTapRewardsPopit",
+			"inputs": [
+				{"name":"name","type":"string"},
+				{"name":"key","type":"uint256"},
+				{"name":"media","type":"optional(string)"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "updateCode",
+			"inputs": [
+				{"name":"newcode","type":"cell"},
+				{"name":"cell","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getPopitGameAddress",
+			"inputs": [
+				{"name":"owner","type":"address"}
+			],
+			"outputs": [
+				{"name":"popitGameAddress","type":"address"}
+			]
+		},
+		{
+			"name": "getMvMultifactorAddress",
+			"inputs": [
+				{"name":"pubkey","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"mvMultifactorAddress","type":"address"}
+			]
+		},
+		{
+			"name": "getPopCoinRootAddress",
+			"inputs": [
+				{"name":"name","type":"string"}
+			],
+			"outputs": [
+				{"name":"popCoinRootAddress","type":"address"}
+			]
+		},
+		{
+			"name": "getIndexerAddress",
+			"inputs": [
+				{"name":"name","type":"string"}
+			],
+			"outputs": [
+				{"name":"indexerAddress","type":"address"}
+			]
+		},
+		{
+			"name": "getIndexerCode",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"data","type":"cell"}
+			]
+		},
+		{
+			"name": "getCodes",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"code","type":"map(uint8,cell)"}
+			]
+		},
+		{
+			"name": "getEpoch",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"epochStart","type":"uint32"},
+				{"name":"epochEnd","type":"uint32"}
+			]
+		},
+		{
+			"name": "getVersion",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"string"},
+				{"name":"value1","type":"string"}
+			]
+		},
+		{
+			"name": "getReward",
+			"inputs": [
+				{"name":"mbi","type":"uint128"},
+				{"name":"MBNLst","type":"uint64[]"},
+				{"name":"TAPLst","type":"uint64[]"},
+				{"name":"value","type":"uint64"},
+				{"name":"basicRewards","type":"uint128"}
+			],
+			"outputs": [
+				{"name":"value0","type":"uint128"}
+			]
+		}
+	],
+	"events": [
+		{
+			"name": "PopCoinRootDestroyed",
+			"inputs": [
+				{"name":"name","type":"string"}
+			],
+			"outputs": [
+			]
+		}
+	],
+	"fields": [
+		{"init":true,"name":"_pubkey","type":"uint256"},
+		{"init":false,"name":"_timestamp","type":"uint64"},
+		{"init":false,"name":"_constructorFlag","type":"bool"},
+		{"init":false,"name":"_code","type":"map(uint8,cell)"},
+		{"init":false,"name":"_networkStart","type":"uint32"},
+		{"init":false,"name":"_epochStart","type":"uint32"},
+		{"init":false,"name":"_epochEnd","type":"uint32"},
+		{"init":false,"name":"_prevEpochDuration","type":"uint128"},
+		{"init":false,"name":"_reward_sum","type":"uint128"},
+		{"init":false,"name":"_reward_adjustment","type":"uint128"},
+		{"init":false,"name":"_reward_adjustment_prev_epoch","type":"uint128"},
+		{"init":false,"name":"_reward_last_time","type":"uint32"},
+		{"init":false,"name":"_min_reward_period","type":"uint32"},
+		{"init":false,"name":"_reward_period","type":"uint32"},
+		{"init":false,"name":"_sum_coef","type":"uint128"},
+		{"init":false,"name":"_calc_reward_num","type":"uint32"},
+		{"init":false,"name":"_last_tap","type":"uint32"},
+		{"init":false,"name":"MBNLstPrev","type":"uint64[]"},
+		{"init":false,"name":"MBNLstCur","type":"uint64[]"},
+		{"init":false,"name":"GLstPrev","type":"uint64[]"},
+		{"init":false,"name":"GLstCur","type":"uint64[]"},
+		{"init":false,"name":"BCLst","type":"uint64[]"}
+	]
+}
