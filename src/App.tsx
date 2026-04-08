@@ -14,6 +14,7 @@ import {
   saveMiningKeys,
   loadMiningKeys,
   clearMiningKeys,
+  APP_IDS,
   type StoredMiningKeys,
 } from './services/bee-sdk';
 import { detectLang, isRTL, t, type Lang } from './services/i18n';
@@ -48,6 +49,13 @@ export default function App() {
   const [storedKeys, setStoredKeys] = useState<StoredMiningKeys | null>(
     () => loadMiningKeys()
   );
+
+  // ═══ Import keys form ═══
+  const [showImportForm, setShowImportForm] = useState(false);
+  const [importMinerAddr, setImportMinerAddr] = useState('');
+  const [importPublic, setImportPublic] = useState('');
+  const [importSecret, setImportSecret] = useState('');
+  const [importAppId, setImportAppId] = useState<string>(APP_IDS.batteries);
 
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
@@ -159,7 +167,7 @@ export default function App() {
     addLog('Generating mining keys…');
 
     try {
-      // Step 1: generate mining keys
+      // Step 1: generate mining keys (uses DEFAULT_APP_ID = popits)
       const keys = await generateMiningKeys();
       addLog(`Mining keys generated. Public: ${keys.publicKey.substring(0, 16)}…`);
 
@@ -176,11 +184,11 @@ export default function App() {
       // Step 4: poll for propagation
       setAuthState('propagating');
       addLog('Waiting for on-chain confirmation…');
-      await waitForAuthorization(minerAddress, keys.publicKey, 180, 2000);
+      await waitForAuthorization(minerAddress, keys.publicKey, APP_IDS.popits, 180, 2000);
       addLog('✓ Mining keys propagated on-chain');
 
       // Step 5: create miner instance
-      await createMiner(minerAddress, keys.publicKey, keys.secretKey);
+      await createMiner(minerAddress, keys.publicKey, keys.secretKey, APP_IDS.popits);
       addLog('✓ Miner instance ready');
 
       // Save keys for next sessions
@@ -189,6 +197,8 @@ export default function App() {
         minerAddress,
         publicKey: keys.publicKey,
         secretKey: keys.secretKey,
+        appId: APP_IDS.popits,
+        source: 'generated',
         authorizedAt: Date.now(),
       };
       saveMiningKeys(stored);
@@ -205,11 +215,68 @@ export default function App() {
     }
   }
 
+  // ═══ IMPORT KEYS MODE — bypass the full auth flow ═══
+  // Uses pre-existing mining keys extracted from Batteries/Popits via F12 trick.
+  // Goes straight to Miner.new() without gen_mining_keys or ensure_mining_keys_propagated.
+  async function handleImportKeys() {
+    const name = walletNameInput.trim();
+    const minerAddr = importMinerAddr.trim();
+    const pub = importPublic.trim();
+    const sec = importSecret.trim();
+    const appId = importAppId;
+
+    if (!name || !minerAddr || !pub || !sec) {
+      addLog('✗ Fill all 4 fields: wallet name, miner address, public, secret');
+      return;
+    }
+    if (!minerAddr.startsWith('0:')) {
+      addLog('✗ Miner address must start with 0:');
+      return;
+    }
+
+    localStorage.setItem('lm_wallet_name', name);
+    setAuthState('generating');
+    addLog(`Importing keys for ${name} (APP_ID=${appId.substring(0, 8)}…${appId.substring(appId.length - 4)})`);
+
+    try {
+      await createMiner(minerAddr, pub, sec, appId);
+      addLog('✓ Miner instance created with imported keys');
+
+      const stored: StoredMiningKeys = {
+        walletName: name,
+        minerAddress: minerAddr,
+        publicKey: pub,
+        secretKey: sec,
+        appId,
+        source: 'imported',
+        authorizedAt: Date.now(),
+      };
+      saveMiningKeys(stored);
+      setStoredKeys(stored);
+      setAuthState('ready');
+      setShowImportForm(false);
+      setImportMinerAddr('');
+      setImportPublic('');
+      setImportSecret('');
+
+      refreshBalance(minerAddr);
+    } catch (e: any) {
+      setAuthState('error');
+      setAuthError(e.message || 'Unknown error');
+      addLog(`✗ Import failed: ${e.message}`);
+    }
+  }
+
   async function handleResumeFromStored() {
     if (!storedKeys) return;
-    addLog('Resuming with stored keys…');
+    addLog(`Resuming with stored keys (${storedKeys.source})…`);
     try {
-      await createMiner(storedKeys.minerAddress, storedKeys.publicKey, storedKeys.secretKey);
+      await createMiner(
+        storedKeys.minerAddress,
+        storedKeys.publicKey,
+        storedKeys.secretKey,
+        storedKeys.appId
+      );
       setAuthState('ready');
       addLog('✓ Miner restored');
       refreshBalance(storedKeys.minerAddress);
@@ -296,14 +363,91 @@ export default function App() {
               style={{ marginBottom: 8 }}
             />
 
-            {authState === 'idle' && (
-              <button
-                className="btn btn--primary btn--full"
-                onClick={handleAuthorizeMining}
-                disabled={!walletNameInput.trim()}
-              >
-                {t(lang, 'authMining')}
-              </button>
+            {authState === 'idle' && !showImportForm && (
+              <>
+                <button
+                  className="btn btn--primary btn--full"
+                  onClick={handleAuthorizeMining}
+                  disabled={!walletNameInput.trim()}
+                >
+                  {t(lang, 'authMining')}
+                </button>
+                <button
+                  className="link-btn"
+                  onClick={() => setShowImportForm(true)}
+                  style={{ marginTop: 10 }}
+                >
+                  I already have mining keys (advanced) →
+                </button>
+              </>
+            )}
+
+            {authState === 'idle' && showImportForm && (
+              <div className="import-form">
+                <div className="import-form__title">Import existing mining keys</div>
+                <div className="import-form__hint">
+                  Paste keys extracted from Batteries/Popits via the F12 console trick.
+                  Skips the AN Wallet authorization dialog entirely.
+                </div>
+
+                <label className="import-label">Miner address</label>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="0:..."
+                  value={importMinerAddr}
+                  onChange={e => setImportMinerAddr(e.target.value)}
+                />
+
+                <label className="import-label">Public key</label>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="hex string"
+                  value={importPublic}
+                  onChange={e => setImportPublic(e.target.value)}
+                />
+
+                <label className="import-label">Secret key (stays in your browser)</label>
+                <input
+                  type="password"
+                  className="input-field"
+                  placeholder="hex string — never shared"
+                  value={importSecret}
+                  onChange={e => setImportSecret(e.target.value)}
+                />
+
+                <label className="import-label">Source app (determines APP_ID)</label>
+                <select
+                  className="input-field"
+                  value={importAppId}
+                  onChange={e => setImportAppId(e.target.value)}
+                >
+                  <option value={APP_IDS.batteries}>Batteries (0x…0002)</option>
+                  <option value={APP_IDS.popits}>Popits (0x…0001)</option>
+                </select>
+
+                <button
+                  className="btn btn--primary btn--full"
+                  onClick={handleImportKeys}
+                  disabled={
+                    !walletNameInput.trim() ||
+                    !importMinerAddr.trim() ||
+                    !importPublic.trim() ||
+                    !importSecret.trim()
+                  }
+                  style={{ marginTop: 12 }}
+                >
+                  Load miner with imported keys
+                </button>
+                <button
+                  className="link-btn"
+                  onClick={() => setShowImportForm(false)}
+                  style={{ marginTop: 8 }}
+                >
+                  ← Back to standard authorization
+                </button>
+              </div>
             )}
 
             {authState === 'generating' && (
