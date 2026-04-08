@@ -314,9 +314,14 @@ export default function App() {
               <>
                 <div className="auth-status">
                   📱 {t(lang, 'authStep2')}
-                  {authState === 'propagating' && <><br/>⏳ {t(lang, 'authStep3')}</>}
+                  {authState === 'propagating' && (
+                    <>
+                      <br />
+                      ⏳ {t(lang, 'authStep3')}
+                    </>
+                  )}
                 </div>
-                
+                <a
                   className="btn btn--primary btn--full"
                   href={deepLink}
                   target="_blank"
