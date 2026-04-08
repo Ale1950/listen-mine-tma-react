@@ -176,7 +176,7 @@ export default function App() {
       // Step 4: poll for propagation
       setAuthState('propagating');
       addLog('Waiting for on-chain confirmation…');
-      await waitForAuthorization(minerAddress, keys.publicKey, 60, 2000);
+      await waitForAuthorization(minerAddress, keys.publicKey, 180, 2000);
       addLog('✓ Mining keys propagated on-chain');
 
       // Step 5: create miner instance
@@ -310,10 +310,13 @@ export default function App() {
               <div className="auth-status">⏳ {t(lang, 'authStep1')}</div>
             )}
 
-            {authState === 'awaiting' && deepLink && (
+            {(authState === 'awaiting' || authState === 'propagating') && deepLink && (
               <>
-                <div className="auth-status">📱 {t(lang, 'authStep2')}</div>
-                <a
+                <div className="auth-status">
+                  📱 {t(lang, 'authStep2')}
+                  {authState === 'propagating' && <><br/>⏳ {t(lang, 'authStep3')}</>}
+                </div>
+                
                   className="btn btn--primary btn--full"
                   href={deepLink}
                   target="_blank"
@@ -322,10 +325,6 @@ export default function App() {
                   {t(lang, 'openWallet')} →
                 </a>
               </>
-            )}
-
-            {authState === 'propagating' && (
-              <div className="auth-status">⏳ {t(lang, 'authStep3')}</div>
             )}
 
             {authState === 'error' && (
