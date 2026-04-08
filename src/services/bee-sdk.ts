@@ -1,29 +1,26 @@
 /**
  * ═══ Bee SDK Service ═══
  *
- * Real integration with @teamgosh/bee-sdk following the official
- * miner-react example from gosh-sh/bee-engine.
+ * Two modes:
  *
- * Flow:
- *   1. init() → load WASM
- *   2. gen_mining_keys(APP_ID) → returns {deep_link, public, secret}
- *   3. show deep_link to user (button or QR) → user opens AN Wallet
- *   4. user confirms registration in AN Wallet
- *   5. get_miner_address_by_wallet_name({wallet_name}) → resolves miner address
- *   6. ensure_mining_keys_propagated(...) → polls until on-chain confirmation
- *   7. Miner.new(...) → creates miner instance
- *   8. miner.start(duration_ms, callback) → start mining session
- *   9. miner.add_tap(x, y) → add tap (we trigger on Last.fm track changes)
- *  10. miner.get_reward() → claim rewards
- *  11. miner.stop() → stop mining
+ * 1. FULL AUTH FLOW (for new users):
+ *    init → gen_mining_keys → resolveMinerAddress → waitForAuthorization → createMiner
+ *    Requires the user to confirm in AN Wallet. Currently "(in progress)" per docs —
+ *    wallet does not show the auth dialog yet.
  *
- * NOTE: At time of writing, @teamgosh/bee-sdk 0.1.0 has a known
- * "MessageFilter" GraphQL schema bug that prevents taps from reaching
- * the chain. Local computation works (tap_computed events fire).
- * Eugene needs to publish 0.1.1 with the fix.
+ * 2. MANUAL KEYS (for users with existing mining keys from Batteries/Popits/etc):
+ *    init → createMiner(pre-existing keys)
+ *    Skips authorization entirely. Uses keys already registered on-chain by another
+ *    official TMA (Batteries, Popits, Ludo). Works today.
  *
- * Once 0.1.1 is published, npm update will activate real mining
- * without any code changes here.
+ * Keys can be extracted from any official TMA via F12 console trick (see INSTRUCTIONS).
+ *
+ * IMPORTANT: Each set of mining keys is tied to a specific APP_ID:
+ *   - Popits → 0x...0001
+ *   - Batteries → 0x...0002
+ *   - Ludo → TBD
+ * You MUST use the SAME app_id when calling Miner.new() as the one that registered
+ * the keys, otherwise the contract won't find the public key and taps will fail.
  */
 
 import init, {
@@ -33,14 +30,23 @@ import init, {
   Miner,
 } from '@teamgosh/bee-sdk';
 
-// Public APP_ID workaround until we deploy our own Dapp ID
-// Per the docs, this is the value to use during integration
-export const APP_ID = '0x0000000000000000000000000000000000000000000000000000000000000001';
+// ═══ APP_IDs of known Acki Nacki TMAs ═══
+export const APP_IDS = {
+  popits: '0x0000000000000000000000000000000000000000000000000000000000000001',
+  batteries: '0x0000000000000000000000000000000000000000000000000000000000000002',
+  // Ludo: TBD (not yet extracted)
+} as const;
+
+export type AppIdKey = keyof typeof APP_IDS;
+
+// Default for fresh gen_mining_keys flow
+export const DEFAULT_APP_ID = APP_IDS.popits;
 
 export const ENDPOINTS = ['https://mainnet.ackinacki.org'];
 
 let wasmInitialized = false;
 let currentMiner: Miner | null = null;
+let currentAppId: string = DEFAULT_APP_ID;
 
 // ═══ Initialize WASM (call once) ═══
 export async function initBeeSDK(): Promise<void> {
@@ -49,12 +55,10 @@ export async function initBeeSDK(): Promise<void> {
   wasmInitialized = true;
 }
 
-// ═══ Step 1: Generate mining keys ═══
-// Returns { deep_link, public, secret }
-// The deep_link is what we show to the user (as button or QR)
-export async function generateMiningKeys() {
+// ═══ FULL AUTH FLOW — Step 1: Generate mining keys ═══
+export async function generateMiningKeys(appId: string = DEFAULT_APP_ID) {
   if (!wasmInitialized) await initBeeSDK();
-  const result = await gen_mining_keys(APP_ID);
+  const result = await gen_mining_keys(appId);
   return {
     deepLink: result.deep_link,
     publicKey: result.public,
@@ -62,7 +66,7 @@ export async function generateMiningKeys() {
   };
 }
 
-// ═══ Step 2: Resolve wallet name to miner address ═══
+// ═══ FULL AUTH FLOW — Step 2: Resolve wallet name to miner address ═══
 export async function resolveMinerAddress(walletName: string): Promise<string> {
   if (!wasmInitialized) await initBeeSDK();
   return await get_miner_address_by_wallet_name({
@@ -71,40 +75,45 @@ export async function resolveMinerAddress(walletName: string): Promise<string> {
   });
 }
 
-// ═══ Step 3: Wait for user authorization ═══
-// Polls the chain until the public key appears in the user's Miner contract
-// Throws if max_attempts is reached without confirmation
+// ═══ FULL AUTH FLOW — Step 3: Wait for user authorization ═══
 export async function waitForAuthorization(
   minerAddress: string,
   expectedPublic: string,
-  maxAttempts = 60,
+  appId: string = DEFAULT_APP_ID,
+  maxAttempts = 180,
   intervalMs = 2000
 ): Promise<void> {
   if (!wasmInitialized) await initBeeSDK();
   await ensure_mining_keys_propagated({
     client_config: { network: { endpoints: ENDPOINTS } },
     miner_address: minerAddress,
-    app_id: APP_ID,
+    app_id: appId,
     expected_owner_public: expectedPublic,
     max_attempts: maxAttempts,
     interval_ms: intervalMs,
   });
 }
 
-// ═══ Step 4: Create miner instance ═══
+// ═══ CREATE MINER — works for both modes ═══
+// appId MUST match the one under which the keys were registered on-chain.
+// For extracted keys from Batteries, use APP_IDS.batteries.
+// For fresh keys from gen_mining_keys(), use the same appId you passed to it.
 export async function createMiner(
   minerAddress: string,
   publicKey: string,
-  secretKey: string
+  secretKey: string,
+  appId: string = DEFAULT_APP_ID
 ): Promise<Miner> {
   if (!wasmInitialized) await initBeeSDK();
-  // Free previous instance if any
+
   if (currentMiner) {
     try { currentMiner.free(); } catch {}
     currentMiner = null;
   }
-  const miner = await Miner.new(ENDPOINTS, APP_ID, minerAddress, publicKey, secretKey);
+
+  const miner = await Miner.new(ENDPOINTS, appId, minerAddress, publicKey, secretKey);
   currentMiner = miner;
+  currentAppId = appId;
   return miner;
 }
 
@@ -112,7 +121,20 @@ export function getCurrentMiner(): Miner | null {
   return currentMiner;
 }
 
+export function getCurrentAppId(): string {
+  return currentAppId;
+}
+
 // ═══ Mining session control ═══
+export function canStartMining(): boolean {
+  if (!currentMiner) return false;
+  try {
+    return currentMiner.can_start();
+  } catch {
+    return false;
+  }
+}
+
 export function startMiningSession(
   durationMs: number,
   callback: (event: any) => void
@@ -160,16 +182,17 @@ export async function getMinerData() {
 }
 
 // ═══ Persistent storage of mining keys ═══
-// Once the user authorizes, we save the keys so we don't have to
-// re-authorize on every session. The secret stays in localStorage
-// (browser-only — never sent to a server).
-const STORAGE_KEY = 'lm_mining_keys_v1';
+// The secret is stored in localStorage (browser-only, never sent to a server).
+// Use clearMiningKeys() when done testing.
+const STORAGE_KEY = 'lm_mining_keys_v2';
 
 export interface StoredMiningKeys {
   walletName: string;
   minerAddress: string;
   publicKey: string;
   secretKey: string;
+  appId: string;
+  source: 'generated' | 'imported';
   authorizedAt: number;
 }
 
