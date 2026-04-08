@@ -422,3 +422,59 @@ a.btn {
   color: var(--text-secondary);
   line-height: 1.4;
 }
+
+/* ═══ Link-style button for secondary actions ═══ */
+.link-btn {
+  background: transparent;
+  border: none;
+  color: var(--neon-blue);
+  font-size: 12px;
+  font-family: var(--font-display);
+  cursor: pointer;
+  text-decoration: none;
+  padding: 6px 0;
+  display: block;
+  width: 100%;
+  text-align: center;
+  transition: color 0.2s;
+}
+.link-btn:hover {
+  color: var(--neon-fuchsia);
+  text-decoration: underline;
+}
+
+/* ═══ Import keys form (advanced mode) ═══ */
+.import-form {
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 184, 0, 0.3);
+  border-radius: 12px;
+  padding: 16px;
+  margin-top: 8px;
+}
+.import-form__title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--warning);
+  margin-bottom: 6px;
+  letter-spacing: 0.5px;
+}
+.import-form__hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-bottom: 14px;
+}
+.import-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 10px 0 4px;
+}
+.import-form .input-field {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 0;
+}
