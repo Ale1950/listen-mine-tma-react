@@ -6,7 +6,7 @@ import react from '@vitejs/plugin-react';
 // with GitHub Pages base path added.
 export default defineConfig({
   plugins: [react()],
-  base: '/listen-mine-tma/',
+  base: '/listen-mine-tma-react/',
   build: {
     outDir: 'dist',
     target: 'es2020',
