@@ -22,6 +22,7 @@ import { detectLang, isRTL, t, type Lang } from './services/i18n';
 type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 'error';
 
 const SESSION_DURATION_MS = 330_000; // 5.5 min, same as official miners
+const TAP_INTERVAL_MS = 4710; // 70 taps per session at 4.710s (matches api_miner.mjs)
 
 export default function App() {
   // ═══ Language ═══
@@ -41,6 +42,12 @@ export default function App() {
   );
   const [currentTrack, setCurrentTrack] = useState<LastFmTrack | null>(null);
   const trackMonitorRef = useRef<TrackMonitor | null>(null);
+
+  // ═══ Mining auto-tap loop (fires every TAP_INTERVAL_MS while session active) ═══
+  const tapTimerRef = useRef<number | null>(null);
+  const sessionTimerRef = useRef<number | null>(null);
+  const tapCoordsRef = useRef({ x: 200, y: 200 });
+  const tapsCountRef = useRef(0);
 
   // ═══ Mining auth ═══
   const [authState, setAuthState] = useState<AuthState>('idle');
@@ -91,23 +98,14 @@ export default function App() {
   }, []);
 
   // ═══ Last.fm track monitor ═══
+  // Track changes are now just for the "now playing" display.
+  // Taps are fired by an independent timer (see handleStartMining).
   useEffect(() => {
     if (!lastfmUser) return;
     addLog(`Monitoring Last.fm: ${lastfmUser}`);
     const monitor = new TrackMonitor(lastfmUser, (track) => {
       setCurrentTrack(track);
       addLog(`♪ ${track.artist} — ${track.title}`);
-      // If mining is active, every track change adds a tap
-      if (miningActive) {
-        // Generate pseudo-random coords from track string for variability
-        const seed = (track.artist + track.title).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-        const x = 100 + (seed % 200);
-        const y = 100 + ((seed * 7) % 300);
-        if (addTap(x, y)) {
-          setTapsCount(c => c + 1);
-          addLog(`👆 Tap (${x},${y})`);
-        }
-      }
     });
     monitor.start(15000);
     trackMonitorRef.current = monitor;
@@ -115,7 +113,7 @@ export default function App() {
       monitor.stop();
       trackMonitorRef.current = null;
     };
-  }, [lastfmUser, miningActive]);
+  }, [lastfmUser]);
 
   // ═══ Wallet balance refresh ═══
   async function refreshBalance(address: string) {
@@ -308,13 +306,57 @@ export default function App() {
     setMiningActive(true);
     setSessionStart(Date.now());
     setTapsCount(0);
-    addLog(`✓ Session started (${SESSION_DURATION_MS / 1000}s)`);
+    tapsCountRef.current = 0;
+    addLog(`✓ Session started (${SESSION_DURATION_MS / 1000}s, tap every ${TAP_INTERVAL_MS / 1000}s)`);
+
+    // Reset coordinate drift starting point
+    tapCoordsRef.current = {
+      x: 100 + Math.floor(Math.random() * 200),
+      y: 100 + Math.floor(Math.random() * 300),
+    };
+
+    // Start auto-tap loop — one tap every TAP_INTERVAL_MS (4.710s)
+    // This matches the official api_miner.mjs script behavior (70 taps / session)
+    tapTimerRef.current = window.setInterval(() => {
+      // Random-walk drift: small movement each tap for varied coordinates
+      // (from WASM analysis: modifiedTapSum rewards varied coords over fixed ones)
+      const c = tapCoordsRef.current;
+      c.x = Math.max(20, Math.min(280, c.x + (Math.random() - 0.5) * 30));
+      c.y = Math.max(20, Math.min(380, c.y + (Math.random() - 0.5) * 30));
+      const x = Math.floor(c.x);
+      const y = Math.floor(c.y);
+
+      if (addTap(x, y)) {
+        tapsCountRef.current += 1;
+        const n = tapsCountRef.current;
+        setTapsCount(n);
+        addLog(`👆 Tap #${n} (${x},${y})`);
+      } else {
+        addLog(`✗ Tap failed (${x},${y})`);
+      }
+    }, TAP_INTERVAL_MS);
+
+    // Auto-stop when session duration expires
+    sessionTimerRef.current = window.setTimeout(() => {
+      addLog('⏰ Session duration expired, auto-stopping');
+      handleStopMining();
+    }, SESSION_DURATION_MS);
   }
 
   function handleStopMining() {
+    // Clear tap timer
+    if (tapTimerRef.current !== null) {
+      window.clearInterval(tapTimerRef.current);
+      tapTimerRef.current = null;
+    }
+    // Clear session auto-stop timer
+    if (sessionTimerRef.current !== null) {
+      window.clearTimeout(sessionTimerRef.current);
+      sessionTimerRef.current = null;
+    }
     stopMining();
     setMiningActive(false);
-    addLog(`Session stopped. Total taps: ${tapsCount}`);
+    addLog(`Session stopped. Total taps: ${tapsCountRef.current}`);
   }
 
   async function handleClaim() {
