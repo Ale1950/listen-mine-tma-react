@@ -64,7 +64,12 @@ export default function App() {
 
   // ═══ Import keys form (JSON paste mode) ═══
   const [showImportForm, setShowImportForm] = useState(false);
+  const [importMode, setImportMode] = useState<'json' | 'manual'>('json');
   const [importJson, setImportJson] = useState('');
+  const [importWalletAddr, setImportWalletAddr] = useState('');
+  const [importMinerAddr, setImportMinerAddr] = useState('');
+  const [importPublic, setImportPublic] = useState('');
+  const [importSecret, setImportSecret] = useState('');
   const [importAppId, setImportAppId] = useState<string>(APP_IDS.popits);
 
   // ═══ Debug panel ═══
@@ -229,43 +234,50 @@ export default function App() {
   }
 
   // ═══ IMPORT KEYS MODE — bypass the full auth flow ═══
-  // Accepts the JSON output from the F12 console trick directly.
-  // Expected shape:
-  //   {
-  //     wallet_address: "0:...",
-  //     miner_address: "0:...",
-  //     keys: { public: "...", secret: "..." }
-  //   }
+  // ═══ IMPORT KEYS MODE — bypass the full auth flow ═══
+  // Two input modes:
+  //   'json'   → paste F12 console output (full JSON)
+  //   'manual' → fill in each field by hand
   async function handleImportKeys() {
     const name = walletNameInput.trim() || 'imported_wallet';
-    const rawJson = importJson.trim();
     const appId = importAppId;
 
-    if (!rawJson) {
-      addLog('✗ Paste the JSON from the F12 console first');
-      return;
-    }
+    let walletAddr = '';
+    let minerAddr = '';
+    let pub = '';
+    let sec = '';
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(rawJson);
-    } catch (e: any) {
-      addLog(`✗ Invalid JSON: ${e.message}`);
-      return;
+    if (importMode === 'json') {
+      const rawJson = importJson.trim();
+      if (!rawJson) {
+        addLog('✗ Paste the JSON from the F12 console first');
+        return;
+      }
+      let parsed: any;
+      try {
+        parsed = JSON.parse(rawJson);
+      } catch (e: any) {
+        addLog(`✗ Invalid JSON: ${e.message}`);
+        return;
+      }
+      walletAddr = String(parsed?.wallet_address || '').trim();
+      minerAddr = String(parsed?.miner_address || '').trim();
+      pub = String(parsed?.keys?.public || '').trim();
+      sec = String(parsed?.keys?.secret || '').trim();
+    } else {
+      walletAddr = importWalletAddr.trim();
+      minerAddr = importMinerAddr.trim();
+      pub = importPublic.trim();
+      sec = importSecret.trim();
     }
-
-    const walletAddr = String(parsed?.wallet_address || '').trim();
-    const minerAddr = String(parsed?.miner_address || '').trim();
-    const pub = String(parsed?.keys?.public || '').trim();
-    const sec = String(parsed?.keys?.secret || '').trim();
 
     const missing: string[] = [];
     if (!walletAddr) missing.push('wallet_address');
     if (!minerAddr) missing.push('miner_address');
-    if (!pub) missing.push('keys.public');
-    if (!sec) missing.push('keys.secret');
+    if (!pub) missing.push('public');
+    if (!sec) missing.push('secret');
     if (missing.length > 0) {
-      addLog(`✗ JSON missing fields: ${missing.join(', ')}`);
+      addLog(`✗ Missing fields: ${missing.join(', ')}`);
       return;
     }
 
@@ -299,6 +311,10 @@ export default function App() {
       setAuthState('ready');
       setShowImportForm(false);
       setImportJson('');
+      setImportWalletAddr('');
+      setImportMinerAddr('');
+      setImportPublic('');
+      setImportSecret('');
 
       refreshBalance(walletAddr);
     } catch (e: any) {
@@ -574,14 +590,76 @@ export default function App() {
                   Skips the AN Wallet authorization dialog.
                 </div>
 
-                <label className="import-label">JSON from F12 console</label>
-                <textarea
-                  className="input-field import-textarea"
-                  placeholder='{"wallet_address":"0:...","miner_address":"0:...","keys":{"public":"...","secret":"..."}}'
-                  value={importJson}
-                  onChange={e => setImportJson(e.target.value)}
-                  rows={6}
-                />
+                {/* Mode tabs */}
+                <div className="mode-tabs">
+                  <button
+                    className={`mode-tab ${importMode === 'json' ? 'mode-tab--active' : ''}`}
+                    onClick={() => setImportMode('json')}
+                  >
+                    📋 Paste JSON
+                  </button>
+                  <button
+                    className={`mode-tab ${importMode === 'manual' ? 'mode-tab--active' : ''}`}
+                    onClick={() => setImportMode('manual')}
+                  >
+                    ✏️ Enter manually
+                  </button>
+                </div>
+
+                {importMode === 'json' && (
+                  <>
+                    <label className="import-label">JSON from F12 console</label>
+                    <textarea
+                      className="input-field import-textarea"
+                      placeholder='{"wallet_address":"0:...","miner_address":"0:...","keys":{"public":"...","secret":"..."}}'
+                      value={importJson}
+                      onChange={e => setImportJson(e.target.value)}
+                      rows={6}
+                    />
+                  </>
+                )}
+
+                {importMode === 'manual' && (
+                  <>
+                    <label className="import-label">Wallet address</label>
+                    <input
+                      type="text"
+                      className="input-field"
+                      placeholder="0:..."
+                      value={importWalletAddr}
+                      onChange={e => setImportWalletAddr(e.target.value)}
+                    />
+
+                    <label className="import-label">Miner address</label>
+                    <input
+                      type="text"
+                      className="input-field"
+                      placeholder="0:..."
+                      value={importMinerAddr}
+                      onChange={e => setImportMinerAddr(e.target.value)}
+                    />
+
+                    <label className="import-label">Public key</label>
+                    <input
+                      type="text"
+                      className="input-field"
+                      placeholder="64-char hex string"
+                      value={importPublic}
+                      onChange={e => setImportPublic(e.target.value)}
+                    />
+
+                    <label className="import-label">
+                      Secret key (stays in your browser)
+                    </label>
+                    <input
+                      type="password"
+                      className="input-field"
+                      placeholder="64-char hex string — never shared"
+                      value={importSecret}
+                      onChange={e => setImportSecret(e.target.value)}
+                    />
+                  </>
+                )}
 
                 <label className="import-label">Source app (determines APP_ID)</label>
                 <select
@@ -601,7 +679,14 @@ export default function App() {
                 <button
                   className="btn btn--primary btn--full"
                   onClick={handleImportKeys}
-                  disabled={!importJson.trim()}
+                  disabled={
+                    importMode === 'json'
+                      ? !importJson.trim()
+                      : !importWalletAddr.trim() ||
+                        !importMinerAddr.trim() ||
+                        !importPublic.trim() ||
+                        !importSecret.trim()
+                  }
                   style={{ marginTop: 12 }}
                 >
                   Load miner with imported keys
@@ -741,6 +826,13 @@ export default function App() {
               style={{ marginTop: 12 }}
             >
               {walletLoading ? '…' : `↻ ${t(lang, 'refresh')}`}
+            </button>
+            <button
+              className="btn btn--back btn--full"
+              onClick={handleDisconnectWallet}
+              style={{ marginTop: 8 }}
+            >
+              🔓 {t(lang, 'disconnect')}
             </button>
           </>
         )}
