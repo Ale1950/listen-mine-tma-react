@@ -92,14 +92,102 @@ export default function App() {
   const [minerDataLoading, setMinerDataLoading] = useState(false);
   const [minerDataAt, setMinerDataAt] = useState<number | null>(null);
 
-  // ═══ NACKL LOCKED — discovered via linked accounts ═══
+  // ═══ NACKL LOCKED — manual baseline tracker ═══
+  // The locked NACKL are stored as state variables inside the Mamaboard
+  // contract which requires the Mamaboard ABI to decode (not public yet).
+  // Instead we use a MANUAL tracker: the user inputs the locked NACKL value
+  // they see in the AN Wallet app, we save it with a timestamp, and show
+  // the delta between the latest two samples. This gives a clean, honest
+  // measurement of mining rewards growth, independent of which app is mining.
+  interface LockedSample {
+    value: number;
+    timestamp: number;  // ms
+    note?: string;
+  }
+  const LOCKED_SAMPLES_KEY = 'lm_locked_samples_v1';
+  const [lockedSamples, setLockedSamples] = useState<LockedSample[]>(() => {
+    try {
+      const raw = localStorage.getItem(LOCKED_SAMPLES_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [newSampleValue, setNewSampleValue] = useState('');
+  const [newSampleNote, setNewSampleNote] = useState('');
+
+  function saveLockedSamples(next: LockedSample[]) {
+    localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
+    setLockedSamples(next);
+  }
+
+  function handleAddLockedSample() {
+    const v = parseFloat(newSampleValue.replace(/[,\s]/g, '').replace(',', '.'));
+    if (isNaN(v) || v < 0) {
+      addLog('✗ Invalid NACKL value');
+      return;
+    }
+    const sample: LockedSample = {
+      value: v,
+      timestamp: Date.now(),
+      note: newSampleNote.trim() || undefined,
+    };
+    const next = [sample, ...lockedSamples].slice(0, 20); // keep last 20
+    saveLockedSamples(next);
+    setNewSampleValue('');
+    setNewSampleNote('');
+    addLog(`✓ Locked NACKL sample saved: ${v.toFixed(2)}`);
+  }
+
+  function handleDeleteLockedSample(idx: number) {
+    const next = lockedSamples.filter((_, i) => i !== idx);
+    saveLockedSamples(next);
+  }
+
+  // Compute delta between first sample (baseline) and latest sample
+  const lockedStats = (() => {
+    if (lockedSamples.length < 1) return null;
+    const latest = lockedSamples[0];
+    const oldest = lockedSamples[lockedSamples.length - 1];
+    if (lockedSamples.length === 1) {
+      return {
+        baseline: oldest,
+        latest,
+        delta: 0,
+        elapsedMs: 0,
+        rateNacklPerHour: 0,
+      };
+    }
+    const delta = latest.value - oldest.value;
+    const elapsedMs = latest.timestamp - oldest.timestamp;
+    const hours = elapsedMs / 3_600_000;
+    const rate = hours > 0 ? delta / hours : 0;
+    return {
+      baseline: oldest,
+      latest,
+      delta,
+      elapsedMs,
+      rateNacklPerHour: rate,
+    };
+  })();
+
+  function formatDuration(ms: number): string {
+    if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+    if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+    const h = Math.floor(ms / 3_600_000);
+    const m = Math.floor((ms % 3_600_000) / 60_000);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+
+  // ═══ NACKL LOCKED — discovered via linked accounts (kept for debug panel) ═══
   // The wallet shows only FREE NACKL. Mining rewards accumulate as LOCKED
   // NACKL inside the Mamaboard contract (one per app). We discover all
-  // contracts the wallet has sent messages to and sum their NACKL balances.
+  // contracts the wallet has sent messages to for diagnostics.
   const [linkedAccounts, setLinkedAccounts] = useState<LinkedAccount[] | null>(null);
   const [linkedLoading, setLinkedLoading] = useState(false);
   const [linkedAt, setLinkedAt] = useState<number | null>(null);
-  const lockedNackl = linkedAccounts ? sumLockedNackl(linkedAccounts) : null;
 
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
@@ -651,6 +739,18 @@ export default function App() {
       lines.push('(not loaded — click "Refresh miner stats" first)');
       lines.push('');
     }
+    if (lockedSamples.length > 0) {
+      lines.push(`── NACKL LOCKED TRACKER (${lockedSamples.length} samples) ──`);
+      for (let i = 0; i < lockedSamples.length; i++) {
+        const s = lockedSamples[i];
+        lines.push(`[${i}] ${new Date(s.timestamp).toISOString()}  ${s.value.toFixed(4)}${s.note ? `  — ${s.note}` : ''}`);
+      }
+      if (lockedStats && lockedStats.elapsedMs > 0) {
+        lines.push(`delta: ${lockedStats.delta >= 0 ? '+' : ''}${lockedStats.delta.toFixed(4)} NACKL over ${formatDuration(lockedStats.elapsedMs)}`);
+        lines.push(`rate: ${lockedStats.rateNacklPerHour.toFixed(4)} NACKL/hour`);
+      }
+      lines.push('');
+    }
     if (linkedAccounts) {
       lines.push(`── LINKED ACCOUNTS (${linkedAccounts.length}) ──`);
       lines.push(`totalLockedNackl: ${sumLockedNackl(linkedAccounts).toFixed(4)}`);
@@ -1032,50 +1132,127 @@ export default function App() {
               </div>
             )}
 
-            {/* ═══ NACKL LOCKED — discovered from linked accounts ═══ */}
+            {/* ═══ NACKL LOCKED — manual baseline tracker ═══ */}
             <div className="locked-block">
               <div className="locked-block__label">
-                🔒 NACKL LOCKED
-                {linkedAccounts && linkedAccounts.length > 0 && (
-                  <span className="locked-block__count">
-                    ({linkedAccounts.length} linked contracts)
-                  </span>
-                )}
-              </div>
-              <div className="locked-block__value">
-                {linkedLoading
-                  ? '⏳ scanning…'
-                  : lockedNackl !== null
-                    ? lockedNackl.toLocaleString('en-US', {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })
-                    : '—'}
+                🔒 NACKL LOCKED TRACKER
               </div>
               <div className="locked-block__hint">
-                {linkedAccounts === null
-                  ? 'Click below to discover linked contracts (Mamaboard, game contracts, etc).'
-                  : linkedAccounts.length === 0
-                    ? 'No outbound messages found from this wallet.'
-                    : `Top holder: ${linkedAccounts[0].address.substring(0, 10)}…${linkedAccounts[0].address.substring(linkedAccounts[0].address.length - 6)} (${linkedAccounts[0].nacklBalance.toFixed(2)} NACKL)`}
+                The locked NACKL is stored inside the Mamaboard/Wallet contract
+                as a private state variable that needs the contract ABI to decode
+                (not yet publicly available). Use this tracker to manually sample
+                the value from your AN Wallet app and measure mining rewards growth.
               </div>
-              {linkedAt && (
-                <div className="locked-block__ts">
-                  Last scan: {new Date(linkedAt).toLocaleTimeString()}
+
+              {lockedStats && lockedStats.latest && (
+                <div className="locked-current">
+                  <div className="locked-current__label">Latest sample</div>
+                  <div className="locked-current__value">
+                    {lockedStats.latest.value.toLocaleString('en-US', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </div>
+                  <div className="locked-current__ts">
+                    {new Date(lockedStats.latest.timestamp).toLocaleString()}
+                    {lockedStats.latest.note && ` — ${lockedStats.latest.note}`}
+                  </div>
                 </div>
               )}
-              <button
-                className="btn btn--full"
-                onClick={() =>
-                  refreshLinkedAccounts(
-                    storedKeys.walletAddress || storedKeys.minerAddress
-                  )
-                }
-                disabled={linkedLoading}
-                style={{ marginTop: 8 }}
-              >
-                {linkedLoading ? '⏳ Scanning chain…' : '🔍 Discover / refresh linked accounts'}
-              </button>
+
+              {lockedStats && lockedStats.elapsedMs > 0 && (
+                <div className="locked-delta">
+                  <div className="locked-delta__row">
+                    <span className="locked-delta__k">Elapsed</span>
+                    <span className="locked-delta__v">
+                      {formatDuration(lockedStats.elapsedMs)}
+                    </span>
+                  </div>
+                  <div className="locked-delta__row">
+                    <span className="locked-delta__k">Δ NACKL</span>
+                    <span
+                      className={`locked-delta__v ${
+                        lockedStats.delta >= 0 ? 'locked-delta__v--pos' : 'locked-delta__v--neg'
+                      }`}
+                    >
+                      {lockedStats.delta >= 0 ? '+' : ''}
+                      {lockedStats.delta.toFixed(4)}
+                    </span>
+                  </div>
+                  <div className="locked-delta__row">
+                    <span className="locked-delta__k">Rate</span>
+                    <span
+                      className={`locked-delta__v ${
+                        lockedStats.rateNacklPerHour >= 0
+                          ? 'locked-delta__v--pos'
+                          : 'locked-delta__v--neg'
+                      }`}
+                    >
+                      {lockedStats.rateNacklPerHour >= 0 ? '+' : ''}
+                      {lockedStats.rateNacklPerHour.toFixed(2)} NACKL/h
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div className="locked-add">
+                <label className="locked-add__label">Add new sample</label>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="e.g. 635218.89"
+                  value={newSampleValue}
+                  onChange={e => setNewSampleValue(e.target.value)}
+                  inputMode="decimal"
+                />
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="Note (optional) — e.g. 'before Listen & Mine test'"
+                  value={newSampleNote}
+                  onChange={e => setNewSampleNote(e.target.value)}
+                  style={{ marginTop: 6 }}
+                />
+                <button
+                  className="btn btn--primary btn--full"
+                  onClick={handleAddLockedSample}
+                  disabled={!newSampleValue.trim()}
+                  style={{ marginTop: 8 }}
+                >
+                  ➕ Save sample
+                </button>
+              </div>
+
+              {lockedSamples.length > 1 && (
+                <details className="locked-history">
+                  <summary>History ({lockedSamples.length} samples)</summary>
+                  {lockedSamples.map((s, i) => (
+                    <div key={s.timestamp} className="locked-history__row">
+                      <div className="locked-history__main">
+                        <span className="locked-history__val">
+                          {s.value.toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </span>
+                        <span className="locked-history__ts">
+                          {new Date(s.timestamp).toLocaleString()}
+                        </span>
+                      </div>
+                      {s.note && (
+                        <div className="locked-history__note">{s.note}</div>
+                      )}
+                      <button
+                        className="locked-history__del"
+                        onClick={() => handleDeleteLockedSample(i)}
+                        title="Delete"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </details>
+              )}
             </div>
 
             <button
@@ -1477,6 +1654,31 @@ export default function App() {
               </div>
             )}
 
+            <div className="debug-section">
+              <div className="debug-section__title">Linked contracts discovery</div>
+              <div className="debug-hint">
+                Scan all contracts this wallet has messaged. Useful to find
+                Mamaboard/game/indexer addresses. Does NOT show locked NACKL
+                (that's tracked manually in the wallet card).
+              </div>
+              <button
+                className="btn btn--full"
+                onClick={() =>
+                  refreshLinkedAccounts(
+                    storedKeys!.walletAddress || storedKeys!.minerAddress
+                  )
+                }
+                disabled={linkedLoading || !storedKeys}
+                style={{ marginTop: 8 }}
+              >
+                {linkedLoading
+                  ? '⏳ Scanning chain…'
+                  : linkedAccounts
+                    ? `🔄 Rescan (${linkedAccounts.length} found)`
+                    : '🔍 Discover linked accounts'}
+              </button>
+            </div>
+
             {linkedAccounts && linkedAccounts.length > 0 && (
               <div className="debug-section">
                 <div className="debug-section__title">
@@ -1484,8 +1686,9 @@ export default function App() {
                 </div>
                 <div className="debug-hint">
                   Contracts this wallet has sent messages to, sorted by NACKL balance.
-                  The top entries are typically Mamaboards, game contracts, or other
-                  reward holders. Tap "explorer" to inspect any of them.
+                  Most entries will show 0 NACKL because locked rewards are
+                  tracked as internal state variables, not ECC balances.
+                  The "msgs" column shows how often each contract was messaged.
                 </div>
                 {linkedAccounts.map((acc, i) => (
                   <div key={acc.address} className="linked-entry">
