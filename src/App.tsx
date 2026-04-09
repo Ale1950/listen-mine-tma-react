@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { getWalletBalance, type WalletBalance } from './services/blockchain';
+import {
+  getWalletBalance,
+  getDebugAccountInfo,
+  explorerAccountUrl,
+  type WalletBalance,
+  type DebugAccountInfo,
+} from './services/blockchain';
 import { TrackMonitor, validateUser, type LastFmTrack } from './services/lastfm';
 import {
   initBeeSDK,
@@ -10,7 +16,6 @@ import {
   startMiningSession,
   stopMining,
   addTap,
-  claimReward,
   saveMiningKeys,
   loadMiningKeys,
   clearMiningKeys,
@@ -57,12 +62,16 @@ export default function App() {
     () => loadMiningKeys()
   );
 
-  // ═══ Import keys form ═══
+  // ═══ Import keys form (JSON paste mode) ═══
   const [showImportForm, setShowImportForm] = useState(false);
-  const [importMinerAddr, setImportMinerAddr] = useState('');
-  const [importPublic, setImportPublic] = useState('');
-  const [importSecret, setImportSecret] = useState('');
-  const [importAppId, setImportAppId] = useState<string>(APP_IDS.batteries);
+  const [importJson, setImportJson] = useState('');
+  const [importAppId, setImportAppId] = useState<string>(APP_IDS.popits);
+
+  // ═══ Debug panel ═══
+  const [showDebug, setShowDebug] = useState(false);
+  const [debugMinerInfo, setDebugMinerInfo] = useState<DebugAccountInfo | null>(null);
+  const [debugWalletInfo, setDebugWalletInfo] = useState<DebugAccountInfo | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
 
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
@@ -92,8 +101,9 @@ export default function App() {
 
   // ═══ Load wallet balance on mount if we have a stored wallet ═══
   useEffect(() => {
-    if (storedKeys?.minerAddress) {
-      refreshBalance(storedKeys.minerAddress);
+    if (storedKeys) {
+      const addrForBalance = storedKeys.walletAddress || storedKeys.minerAddress;
+      refreshBalance(addrForBalance);
     }
   }, []);
 
@@ -190,8 +200,13 @@ export default function App() {
       addLog('✓ Miner instance ready');
 
       // Save keys for next sessions
+      // NOTE: In the full auth flow we don't have the actual wallet address,
+      // only the miner contract address. We use minerAddress as a fallback for
+      // balance queries (will show 0 NACKL because miner contracts don't hold tokens).
+      // Users should use the JSON import path which includes wallet_address.
       const stored: StoredMiningKeys = {
         walletName: name,
+        walletAddress: minerAddress,
         minerAddress,
         publicKey: keys.publicKey,
         secretKey: keys.secretKey,
@@ -214,27 +229,56 @@ export default function App() {
   }
 
   // ═══ IMPORT KEYS MODE — bypass the full auth flow ═══
-  // Uses pre-existing mining keys extracted from Batteries/Popits via F12 trick.
-  // Goes straight to Miner.new() without gen_mining_keys or ensure_mining_keys_propagated.
+  // Accepts the JSON output from the F12 console trick directly.
+  // Expected shape:
+  //   {
+  //     wallet_address: "0:...",
+  //     miner_address: "0:...",
+  //     keys: { public: "...", secret: "..." }
+  //   }
   async function handleImportKeys() {
-    const name = walletNameInput.trim();
-    const minerAddr = importMinerAddr.trim();
-    const pub = importPublic.trim();
-    const sec = importSecret.trim();
+    const name = walletNameInput.trim() || 'imported_wallet';
+    const rawJson = importJson.trim();
     const appId = importAppId;
 
-    if (!name || !minerAddr || !pub || !sec) {
-      addLog('✗ Fill all 4 fields: wallet name, miner address, public, secret');
+    if (!rawJson) {
+      addLog('✗ Paste the JSON from the F12 console first');
       return;
     }
-    if (!minerAddr.startsWith('0:')) {
-      addLog('✗ Miner address must start with 0:');
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch (e: any) {
+      addLog(`✗ Invalid JSON: ${e.message}`);
+      return;
+    }
+
+    const walletAddr = String(parsed?.wallet_address || '').trim();
+    const minerAddr = String(parsed?.miner_address || '').trim();
+    const pub = String(parsed?.keys?.public || '').trim();
+    const sec = String(parsed?.keys?.secret || '').trim();
+
+    const missing: string[] = [];
+    if (!walletAddr) missing.push('wallet_address');
+    if (!minerAddr) missing.push('miner_address');
+    if (!pub) missing.push('keys.public');
+    if (!sec) missing.push('keys.secret');
+    if (missing.length > 0) {
+      addLog(`✗ JSON missing fields: ${missing.join(', ')}`);
+      return;
+    }
+
+    if (!minerAddr.startsWith('0:') || !walletAddr.startsWith('0:')) {
+      addLog('✗ Addresses must start with 0:');
       return;
     }
 
     localStorage.setItem('lm_wallet_name', name);
     setAuthState('generating');
-    addLog(`Importing keys for ${name} (APP_ID=${appId.substring(0, 8)}…${appId.substring(appId.length - 4)})`);
+    addLog(`Importing keys (APP_ID=${appId.substring(0, 10)}…${appId.substring(appId.length - 4)})`);
+    addLog(`Wallet: ${walletAddr.substring(0, 14)}…${walletAddr.substring(walletAddr.length - 6)}`);
+    addLog(`Miner:  ${minerAddr.substring(0, 14)}…${minerAddr.substring(minerAddr.length - 6)}`);
 
     try {
       await createMiner(minerAddr, pub, sec, appId);
@@ -242,6 +286,7 @@ export default function App() {
 
       const stored: StoredMiningKeys = {
         walletName: name,
+        walletAddress: walletAddr,
         minerAddress: minerAddr,
         publicKey: pub,
         secretKey: sec,
@@ -253,11 +298,9 @@ export default function App() {
       setStoredKeys(stored);
       setAuthState('ready');
       setShowImportForm(false);
-      setImportMinerAddr('');
-      setImportPublic('');
-      setImportSecret('');
+      setImportJson('');
 
-      refreshBalance(minerAddr);
+      refreshBalance(walletAddr);
     } catch (e: any) {
       setAuthState('error');
       setAuthError(e.message || 'Unknown error');
@@ -277,7 +320,8 @@ export default function App() {
       );
       setAuthState('ready');
       addLog('✓ Miner restored');
-      refreshBalance(storedKeys.minerAddress);
+      const addrForBalance = storedKeys.walletAddress || storedKeys.minerAddress;
+      refreshBalance(addrForBalance);
     } catch (e: any) {
       addLog(`Restore failed: ${e.message}`);
       clearMiningKeys();
@@ -359,11 +403,106 @@ export default function App() {
     addLog(`Session stopped. Total taps: ${tapsCountRef.current}`);
   }
 
-  async function handleClaim() {
-    addLog('Claiming reward…');
-    const ok = await claimReward();
-    addLog(ok ? '✓ Reward claimed' : '✗ Claim failed');
-    if (storedKeys) refreshBalance(storedKeys.minerAddress);
+  // ═══ Debug runner — fetches on-chain state for wallet + miner ═══
+  async function handleRunDebug() {
+    if (!storedKeys) return;
+    setDebugLoading(true);
+    addLog('Running debug queries…');
+    try {
+      const [walletInfo, minerInfo] = await Promise.all([
+        getDebugAccountInfo(storedKeys.walletAddress || storedKeys.minerAddress),
+        getDebugAccountInfo(storedKeys.minerAddress),
+      ]);
+      setDebugWalletInfo(walletInfo);
+      setDebugMinerInfo(minerInfo);
+      addLog(`✓ Debug: wallet acc_type=${walletInfo.accType}, miner acc_type=${minerInfo.accType}`);
+    } catch (e: any) {
+      addLog(`✗ Debug failed: ${e.message}`);
+    } finally {
+      setDebugLoading(false);
+    }
+  }
+
+  // ═══ Build a pastable debug dump ═══
+  function buildDebugDump(): string {
+    const now = new Date().toISOString();
+    const lines: string[] = [];
+    lines.push('═══ LISTEN & MINE DEBUG DUMP ═══');
+    lines.push(`Generated: ${now}`);
+    lines.push(`User agent: ${navigator.userAgent}`);
+    lines.push('');
+    lines.push('── STATE ──');
+    lines.push(`authState: ${authState}`);
+    lines.push(`miningActive: ${miningActive}`);
+    lines.push(`tapsCount: ${tapsCount}`);
+    lines.push(`lastfmUser: ${lastfmUser || '(none)'}`);
+    lines.push(`currentTrack: ${currentTrack ? `${currentTrack.artist} — ${currentTrack.title}` : '(none)'}`);
+    lines.push('');
+    if (storedKeys) {
+      lines.push('── STORED KEYS ──');
+      lines.push(`walletName: ${storedKeys.walletName}`);
+      lines.push(`walletAddress: ${storedKeys.walletAddress}`);
+      lines.push(`minerAddress: ${storedKeys.minerAddress}`);
+      lines.push(`publicKey: ${storedKeys.publicKey.substring(0, 16)}…${storedKeys.publicKey.substring(storedKeys.publicKey.length - 8)}`);
+      lines.push(`secretKey: [${storedKeys.secretKey.length} chars, hidden]`);
+      lines.push(`appId: ${storedKeys.appId}`);
+      lines.push(`source: ${storedKeys.source}`);
+      lines.push(`authorizedAt: ${new Date(storedKeys.authorizedAt).toISOString()}`);
+      lines.push('');
+    }
+    if (walletBalance) {
+      lines.push('── WALLET BALANCE (cached) ──');
+      lines.push(`network: ${walletBalance.network}`);
+      lines.push(`found: ${walletBalance.found}`);
+      lines.push(`accType: ${walletBalance.accType}`);
+      lines.push(`vmShell: ${walletBalance.vmShell}`);
+      lines.push(`nacklFree: ${walletBalance.nacklFree}`);
+      lines.push(`shell: ${walletBalance.shell}`);
+      lines.push(`usdc: ${walletBalance.usdc}`);
+      lines.push(`rawBalanceOther: ${JSON.stringify(walletBalance.rawBalanceOther)}`);
+      if (walletBalance.error) lines.push(`error: ${walletBalance.error}`);
+      lines.push('');
+    }
+    if (debugWalletInfo) {
+      lines.push('── WALLET DEBUG QUERY ──');
+      lines.push(`network: ${debugWalletInfo.network}`);
+      lines.push(`accType: ${debugWalletInfo.accType}`);
+      lines.push(`balance (VMSHELL nano): ${debugWalletInfo.balance}`);
+      lines.push(`balanceOther: ${JSON.stringify(debugWalletInfo.balanceOther)}`);
+      lines.push(`codeHash: ${debugWalletInfo.codeHash}`);
+      lines.push(`lastPaid: ${debugWalletInfo.lastPaid}`);
+      lines.push(`dappId: ${debugWalletInfo.dappId}`);
+      if (debugWalletInfo.error) lines.push(`error: ${debugWalletInfo.error}`);
+      lines.push('');
+    }
+    if (debugMinerInfo) {
+      lines.push('── MINER CONTRACT DEBUG QUERY ──');
+      lines.push(`network: ${debugMinerInfo.network}`);
+      lines.push(`accType: ${debugMinerInfo.accType}`);
+      lines.push(`balance (VMSHELL nano): ${debugMinerInfo.balance}`);
+      lines.push(`balanceOther: ${JSON.stringify(debugMinerInfo.balanceOther)}`);
+      lines.push(`codeHash: ${debugMinerInfo.codeHash}`);
+      lines.push(`lastPaid: ${debugMinerInfo.lastPaid}`);
+      lines.push(`dappId: ${debugMinerInfo.dappId}`);
+      if (debugMinerInfo.error) lines.push(`error: ${debugMinerInfo.error}`);
+      lines.push('');
+    }
+    lines.push('── LAST 40 LOG LINES ──');
+    lines.push(...logs.slice(0, 40));
+    lines.push('');
+    lines.push('═══ END DUMP ═══');
+    return lines.join('\n');
+  }
+
+  async function handleCopyDebug() {
+    const dump = buildDebugDump();
+    try {
+      await navigator.clipboard.writeText(dump);
+      addLog('✓ Debug dump copied to clipboard');
+    } catch {
+      // Fallback: show in prompt so user can select all
+      window.prompt('Copy this debug info:', dump);
+    }
   }
 
   function handleDisconnectWallet() {
@@ -373,6 +512,8 @@ export default function App() {
     setWalletBalance(null);
     setWalletNameInput('');
     setAuthState('idle');
+    setDebugMinerInfo(null);
+    setDebugWalletInfo(null);
     localStorage.removeItem('lm_wallet_name');
     addLog('Wallet disconnected');
   }
@@ -428,35 +569,18 @@ export default function App() {
               <div className="import-form">
                 <div className="import-form__title">Import existing mining keys</div>
                 <div className="import-form__hint">
-                  Paste keys extracted from Batteries/Popits via the F12 console trick.
-                  Skips the AN Wallet authorization dialog entirely.
+                  Paste the JSON output from the F12 console trick (Batteries / Popits / Ludo).
+                  Everything is extracted automatically — wallet address, miner address, public &amp; secret keys.
+                  Skips the AN Wallet authorization dialog.
                 </div>
 
-                <label className="import-label">Miner address</label>
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="0:..."
-                  value={importMinerAddr}
-                  onChange={e => setImportMinerAddr(e.target.value)}
-                />
-
-                <label className="import-label">Public key</label>
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="hex string"
-                  value={importPublic}
-                  onChange={e => setImportPublic(e.target.value)}
-                />
-
-                <label className="import-label">Secret key (stays in your browser)</label>
-                <input
-                  type="password"
-                  className="input-field"
-                  placeholder="hex string — never shared"
-                  value={importSecret}
-                  onChange={e => setImportSecret(e.target.value)}
+                <label className="import-label">JSON from F12 console</label>
+                <textarea
+                  className="input-field import-textarea"
+                  placeholder='{"wallet_address":"0:...","miner_address":"0:...","keys":{"public":"...","secret":"..."}}'
+                  value={importJson}
+                  onChange={e => setImportJson(e.target.value)}
+                  rows={6}
                 />
 
                 <label className="import-label">Source app (determines APP_ID)</label>
@@ -465,19 +589,19 @@ export default function App() {
                   value={importAppId}
                   onChange={e => setImportAppId(e.target.value)}
                 >
-                  <option value={APP_IDS.batteries}>Batteries (0x…0002)</option>
                   <option value={APP_IDS.popits}>Popits (0x…0001)</option>
+                  <option value={APP_IDS.batteries}>Batteries (0x…0002)</option>
                 </select>
+
+                <div className="import-hint-small">
+                  ⚠️ Match this to the TMA where you extracted the keys. Using the wrong APP_ID
+                  causes the Miner contract to reject the taps.
+                </div>
 
                 <button
                   className="btn btn--primary btn--full"
                   onClick={handleImportKeys}
-                  disabled={
-                    !walletNameInput.trim() ||
-                    !importMinerAddr.trim() ||
-                    !importPublic.trim() ||
-                    !importSecret.trim()
-                  }
+                  disabled={!importJson.trim()}
                   style={{ marginTop: 12 }}
                 >
                   Load miner with imported keys
@@ -552,9 +676,37 @@ export default function App() {
               <span className="badge badge--success">✓ {t(lang, 'authReady')}</span>
             </div>
 
-            <div className="wallet-address">
-              {storedKeys.minerAddress.substring(0, 10)}…
-              {storedKeys.minerAddress.substring(storedKeys.minerAddress.length - 10)}
+            <div className="addr-row">
+              <div className="addr-label">Wallet</div>
+              <div className="addr-value">
+                {(storedKeys.walletAddress || storedKeys.minerAddress).substring(0, 10)}…
+                {(storedKeys.walletAddress || storedKeys.minerAddress).substring(
+                  (storedKeys.walletAddress || storedKeys.minerAddress).length - 8
+                )}
+              </div>
+              <a
+                className="addr-link"
+                href={explorerAccountUrl(storedKeys.walletAddress || storedKeys.minerAddress)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                explorer ↗
+              </a>
+            </div>
+            <div className="addr-row">
+              <div className="addr-label">Miner</div>
+              <div className="addr-value">
+                {storedKeys.minerAddress.substring(0, 10)}…
+                {storedKeys.minerAddress.substring(storedKeys.minerAddress.length - 8)}
+              </div>
+              <a
+                className="addr-link"
+                href={explorerAccountUrl(storedKeys.minerAddress)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                explorer ↗
+              </a>
             </div>
 
             {walletBalance?.found && (
@@ -582,18 +734,13 @@ export default function App() {
 
             <button
               className="btn btn--full"
-              onClick={() => refreshBalance(storedKeys.minerAddress)}
+              onClick={() =>
+                refreshBalance(storedKeys.walletAddress || storedKeys.minerAddress)
+              }
               disabled={walletLoading}
               style={{ marginTop: 12 }}
             >
               {walletLoading ? '…' : `↻ ${t(lang, 'refresh')}`}
-            </button>
-            <button
-              className="btn btn--back btn--full"
-              onClick={handleDisconnectWallet}
-              style={{ marginTop: 8 }}
-            >
-              {t(lang, 'disconnect')}
             </button>
           </>
         )}
@@ -661,19 +808,20 @@ export default function App() {
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <div style={{ marginTop: 12 }}>
             {!miningActive ? (
-              <button className="btn btn--primary" style={{ flex: 1 }} onClick={handleStartMining}>
+              <button className="btn btn--primary btn--full" onClick={handleStartMining}>
                 {t(lang, 'startMining')}
               </button>
             ) : (
-              <button className="btn" style={{ flex: 1 }} onClick={handleStopMining}>
+              <button className="btn btn--full" onClick={handleStopMining}>
                 {t(lang, 'stopMining')}
               </button>
             )}
-            <button className="btn" onClick={handleClaim}>
-              {t(lang, 'claim')}
-            </button>
+          </div>
+          <div className="mining-info">
+            ℹ️ Rewards are collected automatically when session data is submitted on-chain.
+            Check your wallet balance after a few completed sessions.
           </div>
         </div>
       )}
@@ -690,6 +838,149 @@ export default function App() {
             ))
           )}
         </div>
+      </div>
+
+      {/* ═══ DEBUG PANEL ═══ */}
+      <div className="card">
+        <div className="card__label">
+          <button
+            className="debug-toggle"
+            onClick={() => setShowDebug(s => !s)}
+          >
+            {showDebug ? '▼' : '▶'} Debug
+          </button>
+        </div>
+        {showDebug && (
+          <div className="debug-body">
+            <div className="debug-hint">
+              Use this panel to inspect on-chain state and copy a diagnostic dump.
+            </div>
+
+            <div className="debug-actions">
+              <button
+                className="btn btn--full"
+                onClick={handleRunDebug}
+                disabled={!storedKeys || debugLoading}
+              >
+                {debugLoading ? 'Querying…' : '⚡ Run on-chain debug queries'}
+              </button>
+              <button
+                className="btn btn--full"
+                onClick={handleCopyDebug}
+                style={{ marginTop: 8 }}
+              >
+                📋 Copy debug dump to clipboard
+              </button>
+            </div>
+
+            {storedKeys && (
+              <>
+                <div className="debug-section">
+                  <div className="debug-section__title">Stored keys</div>
+                  <div className="debug-kv">
+                    <span>walletName</span>
+                    <code>{storedKeys.walletName}</code>
+                  </div>
+                  <div className="debug-kv">
+                    <span>appId</span>
+                    <code>{storedKeys.appId.substring(0, 10)}…{storedKeys.appId.substring(storedKeys.appId.length - 4)}</code>
+                  </div>
+                  <div className="debug-kv">
+                    <span>source</span>
+                    <code>{storedKeys.source}</code>
+                  </div>
+                  <div className="debug-kv">
+                    <span>publicKey</span>
+                    <code>{storedKeys.publicKey.substring(0, 16)}…</code>
+                  </div>
+                  <div className="debug-kv">
+                    <span>walletAddress</span>
+                    <code className="debug-addr">{storedKeys.walletAddress}</code>
+                  </div>
+                  <div className="debug-kv">
+                    <span>minerAddress</span>
+                    <code className="debug-addr">{storedKeys.minerAddress}</code>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {debugWalletInfo && (
+              <div className="debug-section">
+                <div className="debug-section__title">Wallet on-chain ({debugWalletInfo.network})</div>
+                <div className="debug-kv">
+                  <span>acc_type</span>
+                  <code>{debugWalletInfo.accType ?? 'null'}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>VMSHELL (nano)</span>
+                  <code>{debugWalletInfo.balance}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>balance_other</span>
+                  <code>{JSON.stringify(debugWalletInfo.balanceOther)}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>dapp_id</span>
+                  <code className="debug-addr">{debugWalletInfo.dappId || '—'}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>last_paid</span>
+                  <code>{debugWalletInfo.lastPaid || '—'}</code>
+                </div>
+                {debugWalletInfo.error && (
+                  <div className="debug-kv">
+                    <span>error</span>
+                    <code className="debug-error">{debugWalletInfo.error}</code>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {debugMinerInfo && (
+              <div className="debug-section">
+                <div className="debug-section__title">Miner contract on-chain ({debugMinerInfo.network})</div>
+                <div className="debug-kv">
+                  <span>acc_type</span>
+                  <code>{debugMinerInfo.accType ?? 'null'}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>VMSHELL (nano)</span>
+                  <code>{debugMinerInfo.balance}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>balance_other</span>
+                  <code>{JSON.stringify(debugMinerInfo.balanceOther)}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>dapp_id</span>
+                  <code className="debug-addr">{debugMinerInfo.dappId || '—'}</code>
+                </div>
+                <div className="debug-kv">
+                  <span>last_paid</span>
+                  <code>{debugMinerInfo.lastPaid || '—'}</code>
+                </div>
+                {debugMinerInfo.error && (
+                  <div className="debug-kv">
+                    <span>error</span>
+                    <code className="debug-error">{debugMinerInfo.error}</code>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="debug-section">
+              <div className="debug-section__title">Disconnect / reset</div>
+              <button
+                className="btn btn--back btn--full"
+                onClick={handleDisconnectWallet}
+                style={{ marginTop: 8 }}
+              >
+                {t(lang, 'disconnect')}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
