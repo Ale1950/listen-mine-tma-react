@@ -2,9 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import {
   getWalletBalance,
   getDebugAccountInfo,
+  discoverLinkedAccounts,
+  sumLockedNackl,
   explorerAccountUrl,
   type WalletBalance,
   type DebugAccountInfo,
+  type LinkedAccount,
 } from './services/blockchain';
 import { TrackMonitor, validateUser, type LastFmTrack } from './services/lastfm';
 import {
@@ -89,6 +92,15 @@ export default function App() {
   const [minerDataLoading, setMinerDataLoading] = useState(false);
   const [minerDataAt, setMinerDataAt] = useState<number | null>(null);
 
+  // ═══ NACKL LOCKED — discovered via linked accounts ═══
+  // The wallet shows only FREE NACKL. Mining rewards accumulate as LOCKED
+  // NACKL inside the Mamaboard contract (one per app). We discover all
+  // contracts the wallet has sent messages to and sum their NACKL balances.
+  const [linkedAccounts, setLinkedAccounts] = useState<LinkedAccount[] | null>(null);
+  const [linkedLoading, setLinkedLoading] = useState(false);
+  const [linkedAt, setLinkedAt] = useState<number | null>(null);
+  const lockedNackl = linkedAccounts ? sumLockedNackl(linkedAccounts) : null;
+
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
   const [tapsCount, setTapsCount] = useState(0);
@@ -156,10 +168,34 @@ export default function App() {
     }
   }
 
+  // ═══ Linked accounts discovery & locked NACKL ═══
+  // Calls discoverLinkedAccounts() which:
+  //  1. Queries the wallet's outbound internal messages (IntOut)
+  //  2. Extracts unique destination addresses (these are the contracts the wallet interacts with)
+  //  3. Batch-fetches balance_other for each
+  //  4. Sums NACKL (currency 1) across all of them → this is "LOCKED NACKL"
+  // The top result by NACKL balance is typically the Mamaboard.
+  async function refreshLinkedAccounts(walletAddr?: string) {
+    const addr = walletAddr || storedKeys?.walletAddress;
+    if (!addr) return;
+    setLinkedLoading(true);
+    addLog('🔍 Discovering linked accounts…');
+    try {
+      const accounts = await discoverLinkedAccounts(addr);
+      setLinkedAccounts(accounts);
+      setLinkedAt(Date.now());
+      const total = sumLockedNackl(accounts);
+      addLog(`✓ Found ${accounts.length} linked accounts, total NACKL locked: ${total.toFixed(4)}`);
+    } catch (e: any) {
+      addLog(`✗ Linked accounts discovery failed: ${e.message}`);
+    } finally {
+      setLinkedLoading(false);
+    }
+  }
+
   // ═══ Miner contract data refresh ═══
   // Calls bee-sdk.getMinerData() which reads the full contract state:
   // _tapSum, _modifiedTapSum, _commitTaps, _miningDurSum, _seed, _epochStart, etc.
-  // This is where "pending/locked NACKL" would be visible if it exists.
   async function refreshMinerData() {
     setMinerDataLoading(true);
     try {
@@ -362,6 +398,7 @@ export default function App() {
 
       refreshBalance(walletAddr);
       refreshMinerData();
+      refreshLinkedAccounts(walletAddr);
     } catch (e: any) {
       setAuthState('error');
       setAuthError(e.message || 'Unknown error');
@@ -384,6 +421,7 @@ export default function App() {
       const addrForBalance = storedKeys.walletAddress || storedKeys.minerAddress;
       refreshBalance(addrForBalance);
       refreshMinerData();
+      refreshLinkedAccounts(addrForBalance);
     } catch (e: any) {
       addLog(`Restore failed: ${e.message}`);
       clearMiningKeys();
@@ -613,6 +651,23 @@ export default function App() {
       lines.push('(not loaded — click "Refresh miner stats" first)');
       lines.push('');
     }
+    if (linkedAccounts) {
+      lines.push(`── LINKED ACCOUNTS (${linkedAccounts.length}) ──`);
+      lines.push(`totalLockedNackl: ${sumLockedNackl(linkedAccounts).toFixed(4)}`);
+      for (let i = 0; i < linkedAccounts.length; i++) {
+        const a = linkedAccounts[i];
+        lines.push(`#${i + 1} ${a.address}`);
+        lines.push(`   nackl=${a.nacklBalance.toFixed(4)} shell=${a.shellBalance.toFixed(4)} usdc=${a.usdcBalance.toFixed(4)} vmShell=${a.vmShell.toFixed(4)}`);
+        lines.push(`   msgs=${a.messageCount} accType=${a.accType} dappId=${a.dappId || '—'}`);
+        lines.push(`   codeHash=${a.codeHash || '—'}`);
+      }
+      if (linkedAt) lines.push(`lastScan: ${new Date(linkedAt).toISOString()}`);
+      lines.push('');
+    } else {
+      lines.push('── LINKED ACCOUNTS ──');
+      lines.push('(not scanned — click "Discover linked accounts" first)');
+      lines.push('');
+    }
     lines.push('── LAST 40 LOG LINES ──');
     lines.push(...logs.slice(0, 40));
     lines.push('');
@@ -628,6 +683,11 @@ export default function App() {
     }
     if (storedKeys && !debugWalletInfo) {
       await handleRunDebug();
+    }
+    if (storedKeys && !linkedAccounts) {
+      await refreshLinkedAccounts(
+        storedKeys.walletAddress || storedKeys.minerAddress
+      );
     }
     const dump = buildDebugDump();
     try {
@@ -683,6 +743,8 @@ export default function App() {
     setDebugWalletInfo(null);
     setMinerData(null);
     setMinerDataAt(null);
+    setLinkedAccounts(null);
+    setLinkedAt(null);
     localStorage.removeItem('lm_wallet_name');
     addLog('Wallet disconnected');
   }
@@ -969,6 +1031,52 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* ═══ NACKL LOCKED — discovered from linked accounts ═══ */}
+            <div className="locked-block">
+              <div className="locked-block__label">
+                🔒 NACKL LOCKED
+                {linkedAccounts && linkedAccounts.length > 0 && (
+                  <span className="locked-block__count">
+                    ({linkedAccounts.length} linked contracts)
+                  </span>
+                )}
+              </div>
+              <div className="locked-block__value">
+                {linkedLoading
+                  ? '⏳ scanning…'
+                  : lockedNackl !== null
+                    ? lockedNackl.toLocaleString('en-US', {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })
+                    : '—'}
+              </div>
+              <div className="locked-block__hint">
+                {linkedAccounts === null
+                  ? 'Click below to discover linked contracts (Mamaboard, game contracts, etc).'
+                  : linkedAccounts.length === 0
+                    ? 'No outbound messages found from this wallet.'
+                    : `Top holder: ${linkedAccounts[0].address.substring(0, 10)}…${linkedAccounts[0].address.substring(linkedAccounts[0].address.length - 6)} (${linkedAccounts[0].nacklBalance.toFixed(2)} NACKL)`}
+              </div>
+              {linkedAt && (
+                <div className="locked-block__ts">
+                  Last scan: {new Date(linkedAt).toLocaleTimeString()}
+                </div>
+              )}
+              <button
+                className="btn btn--full"
+                onClick={() =>
+                  refreshLinkedAccounts(
+                    storedKeys.walletAddress || storedKeys.minerAddress
+                  )
+                }
+                disabled={linkedLoading}
+                style={{ marginTop: 8 }}
+              >
+                {linkedLoading ? '⏳ Scanning chain…' : '🔍 Discover / refresh linked accounts'}
+              </button>
+            </div>
 
             <button
               className="btn btn--full"
@@ -1366,6 +1474,55 @@ export default function App() {
                     <code className="debug-error">{debugMinerInfo.error}</code>
                   </div>
                 )}
+              </div>
+            )}
+
+            {linkedAccounts && linkedAccounts.length > 0 && (
+              <div className="debug-section">
+                <div className="debug-section__title">
+                  Linked accounts ({linkedAccounts.length})
+                </div>
+                <div className="debug-hint">
+                  Contracts this wallet has sent messages to, sorted by NACKL balance.
+                  The top entries are typically Mamaboards, game contracts, or other
+                  reward holders. Tap "explorer" to inspect any of them.
+                </div>
+                {linkedAccounts.map((acc, i) => (
+                  <div key={acc.address} className="linked-entry">
+                    <div className="linked-entry__header">
+                      <span className="linked-entry__rank">#{i + 1}</span>
+                      <a
+                        className="linked-entry__addr"
+                        href={explorerAccountUrl(acc.address)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {acc.address.substring(0, 12)}…
+                        {acc.address.substring(acc.address.length - 8)} ↗
+                      </a>
+                    </div>
+                    <div className="linked-entry__grid">
+                      <div>
+                        <span className="linked-entry__k">NACKL</span>
+                        <span className="linked-entry__v linked-entry__v--highlight">
+                          {acc.nacklBalance.toFixed(2)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="linked-entry__k">SHELL</span>
+                        <span className="linked-entry__v">{acc.shellBalance.toFixed(2)}</span>
+                      </div>
+                      <div>
+                        <span className="linked-entry__k">USDC</span>
+                        <span className="linked-entry__v">{acc.usdcBalance.toFixed(2)}</span>
+                      </div>
+                      <div>
+                        <span className="linked-entry__k">msgs</span>
+                        <span className="linked-entry__v">{acc.messageCount}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
 
