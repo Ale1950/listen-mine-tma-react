@@ -188,7 +188,8 @@ const STORAGE_KEY = 'lm_mining_keys_v2';
 
 export interface StoredMiningKeys {
   walletName: string;
-  minerAddress: string;
+  walletAddress: string;  // The actual wallet address (where NACKL/SHELL/USDC live)
+  minerAddress: string;   // The miner contract address (where tap work is tracked)
   publicKey: string;
   secretKey: string;
   appId: string;
