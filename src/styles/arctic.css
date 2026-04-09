@@ -478,3 +478,143 @@ a.btn {
   font-size: 11px;
   margin-top: 0;
 }
+
+/* ═══ Import JSON textarea ═══ */
+.import-textarea {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 100px;
+  word-break: break-all;
+}
+.import-hint-small {
+  font-size: 10px;
+  color: var(--warning);
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+/* ═══ Dual address rows (wallet + miner) ═══ */
+.addr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.15);
+  border-radius: 8px;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.addr-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  min-width: 44px;
+}
+.addr-value {
+  flex: 1;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.addr-link {
+  color: var(--neon-blue);
+  text-decoration: none;
+  font-size: 10px;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+.addr-link:hover {
+  color: var(--neon-fuchsia);
+}
+
+/* ═══ Mining info message ═══ */
+.mining-info {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-top: 12px;
+  padding: 10px;
+  background: rgba(0, 212, 255, 0.05);
+  border-left: 2px solid var(--neon-blue);
+  border-radius: 4px;
+}
+
+/* ═══ Debug panel ═══ */
+.debug-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 0;
+  width: 100%;
+  text-align: left;
+}
+.debug-toggle:hover {
+  color: var(--neon-blue);
+}
+.debug-body {
+  margin-top: 12px;
+}
+.debug-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.debug-actions {
+  margin-bottom: 16px;
+}
+.debug-section {
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 12px;
+}
+.debug-section__title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--neon-blue);
+  margin-bottom: 8px;
+}
+.debug-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.debug-kv:last-child {
+  border-bottom: none;
+}
+.debug-kv > span {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.debug-kv code {
+  color: var(--text-primary);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+  word-break: break-all;
+  max-width: 70%;
+}
+.debug-addr {
+  font-size: 9px !important;
+}
+.debug-error {
+  color: var(--error) !important;
+}
