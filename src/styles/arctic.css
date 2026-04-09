@@ -864,3 +864,148 @@ a.btn {
   color: var(--warning);
   font-weight: 700;
 }
+
+/* ═══ Locked NACKL manual tracker ═══ */
+.locked-current {
+  background: rgba(255, 184, 0, 0.06);
+  border: 1px solid rgba(255, 184, 0, 0.2);
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 12px;
+}
+.locked-current__label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.locked-current__value {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--warning);
+  line-height: 1.1;
+  margin-bottom: 4px;
+}
+.locked-current__ts {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.locked-delta {
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.locked-delta__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.locked-delta__row:last-child {
+  border-bottom: none;
+}
+.locked-delta__k {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.locked-delta__v {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.locked-delta__v--pos {
+  color: #00ff96;
+}
+.locked-delta__v--neg {
+  color: var(--error);
+}
+
+.locked-add {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.05);
+}
+.locked-add__label {
+  display: block;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.locked-history {
+  margin-top: 12px;
+  font-size: 11px;
+}
+.locked-history summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 6px 0;
+  user-select: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.locked-history summary:hover {
+  color: var(--neon-blue);
+}
+.locked-history__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  margin-top: 4px;
+  background: var(--bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+}
+.locked-history__main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.locked-history__val {
+  font-weight: 700;
+  color: var(--warning);
+  font-size: 11px;
+}
+.locked-history__ts {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+.locked-history__note {
+  color: var(--text-secondary);
+  font-size: 9px;
+  word-break: break-word;
+  margin-top: 2px;
+}
+.locked-history__del {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.locked-history__del:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
