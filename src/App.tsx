@@ -16,6 +16,7 @@ import {
   startMiningSession,
   stopMining,
   addTap,
+  getMinerData,
   saveMiningKeys,
   loadMiningKeys,
   clearMiningKeys,
@@ -53,6 +54,9 @@ export default function App() {
   const sessionTimerRef = useRef<number | null>(null);
   const tapCoordsRef = useRef({ x: 200, y: 200 });
   const tapsCountRef = useRef(0);
+  // Screen Wake Lock — prevents iOS/Android from putting the page to sleep
+  // which throttles setInterval and kills the tap loop mid-session.
+  const wakeLockRef = useRef<any>(null);
 
   // ═══ Mining auth ═══
   const [authState, setAuthState] = useState<AuthState>('idle');
@@ -77,6 +81,13 @@ export default function App() {
   const [debugMinerInfo, setDebugMinerInfo] = useState<DebugAccountInfo | null>(null);
   const [debugWalletInfo, setDebugWalletInfo] = useState<DebugAccountInfo | null>(null);
   const [debugLoading, setDebugLoading] = useState(false);
+
+  // ═══ Miner contract state (tapSum, commitTaps, pending rewards, etc) ═══
+  // Read via bee-sdk.getMinerData() which returns the full contract account data.
+  // We re-read it every 30s while mining is active to track accumulated work.
+  const [minerData, setMinerData] = useState<any>(null);
+  const [minerDataLoading, setMinerDataLoading] = useState(false);
+  const [minerDataAt, setMinerDataAt] = useState<number | null>(null);
 
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
@@ -144,6 +155,38 @@ export default function App() {
       setWalletLoading(false);
     }
   }
+
+  // ═══ Miner contract data refresh ═══
+  // Calls bee-sdk.getMinerData() which reads the full contract state:
+  // _tapSum, _modifiedTapSum, _commitTaps, _miningDurSum, _seed, _epochStart, etc.
+  // This is where "pending/locked NACKL" would be visible if it exists.
+  async function refreshMinerData() {
+    setMinerDataLoading(true);
+    try {
+      const data = await getMinerData();
+      setMinerData(data);
+      setMinerDataAt(Date.now());
+      if (data) {
+        addLog('✓ Miner stats refreshed');
+      } else {
+        addLog('✗ getMinerData returned null');
+      }
+    } catch (e: any) {
+      addLog(`Miner stats error: ${e.message}`);
+    } finally {
+      setMinerDataLoading(false);
+    }
+  }
+
+  // Auto-refresh miner stats every 30s while mining is active
+  useEffect(() => {
+    if (!miningActive) return;
+    const id = window.setInterval(() => {
+      refreshMinerData();
+    }, 30000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [miningActive]);
 
   // ═══ Handlers ═══
   async function handleSetLastfm() {
@@ -224,8 +267,9 @@ export default function App() {
       setAuthState('ready');
       setDeepLink('');
 
-      // Refresh balance
+      // Refresh balance and miner stats
       refreshBalance(minerAddress);
+      refreshMinerData();
     } catch (e: any) {
       setAuthState('error');
       setAuthError(e.message || 'Unknown error');
@@ -317,6 +361,7 @@ export default function App() {
       setImportSecret('');
 
       refreshBalance(walletAddr);
+      refreshMinerData();
     } catch (e: any) {
       setAuthState('error');
       setAuthError(e.message || 'Unknown error');
@@ -338,6 +383,7 @@ export default function App() {
       addLog('✓ Miner restored');
       const addrForBalance = storedKeys.walletAddress || storedKeys.minerAddress;
       refreshBalance(addrForBalance);
+      refreshMinerData();
     } catch (e: any) {
       addLog(`Restore failed: ${e.message}`);
       clearMiningKeys();
@@ -368,6 +414,25 @@ export default function App() {
     setTapsCount(0);
     tapsCountRef.current = 0;
     addLog(`✓ Session started (${SESSION_DURATION_MS / 1000}s, tap every ${TAP_INTERVAL_MS / 1000}s)`);
+
+    // Request Screen Wake Lock to prevent iOS/Android from throttling timers
+    // when the screen dims. Gracefully skipped if API is unavailable.
+    (async () => {
+      try {
+        const nav: any = navigator;
+        if (nav.wakeLock && typeof nav.wakeLock.request === 'function') {
+          wakeLockRef.current = await nav.wakeLock.request('screen');
+          addLog('🔒 Screen wake lock acquired (screen will stay on)');
+          wakeLockRef.current.addEventListener?.('release', () => {
+            addLog('⚠️ Wake lock released by system');
+          });
+        } else {
+          addLog('⚠️ Wake Lock API unavailable — keep the TMA in foreground');
+        }
+      } catch (e: any) {
+        addLog(`⚠️ Wake lock failed: ${e.message || 'unknown'}`);
+      }
+    })();
 
     // Reset coordinate drift starting point
     tapCoordsRef.current = {
@@ -414,10 +479,36 @@ export default function App() {
       window.clearTimeout(sessionTimerRef.current);
       sessionTimerRef.current = null;
     }
+    // Release wake lock
+    if (wakeLockRef.current) {
+      try {
+        wakeLockRef.current.release?.();
+      } catch {}
+      wakeLockRef.current = null;
+    }
     stopMining();
     setMiningActive(false);
     addLog(`Session stopped. Total taps: ${tapsCountRef.current}`);
   }
+
+  // Re-acquire wake lock when the TMA comes back to foreground mid-session
+  // (iOS/Android auto-release it when the page loses visibility).
+  useEffect(() => {
+    if (!miningActive) return;
+    const handleVisibility = async () => {
+      if (document.visibilityState === 'visible' && miningActive && !wakeLockRef.current) {
+        try {
+          const nav: any = navigator;
+          if (nav.wakeLock?.request) {
+            wakeLockRef.current = await nav.wakeLock.request('screen');
+            addLog('🔒 Wake lock re-acquired after returning to foreground');
+          }
+        } catch {}
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [miningActive]);
 
   // ═══ Debug runner — fetches on-chain state for wallet + miner ═══
   async function handleRunDebug() {
@@ -503,6 +594,25 @@ export default function App() {
       if (debugMinerInfo.error) lines.push(`error: ${debugMinerInfo.error}`);
       lines.push('');
     }
+    if (minerData) {
+      lines.push('── MINER STATS (getMinerData raw) ──');
+      lines.push(
+        JSON.stringify(
+          minerData,
+          (_, v) => (typeof v === 'bigint' ? v.toString() + 'n' : v),
+          2
+        )
+      );
+      lines.push('');
+      if (minerDataAt) {
+        lines.push(`lastRefresh: ${new Date(minerDataAt).toISOString()}`);
+        lines.push('');
+      }
+    } else {
+      lines.push('── MINER STATS ──');
+      lines.push('(not loaded — click "Refresh miner stats" first)');
+      lines.push('');
+    }
     lines.push('── LAST 40 LOG LINES ──');
     lines.push(...logs.slice(0, 40));
     lines.push('');
@@ -511,6 +621,14 @@ export default function App() {
   }
 
   async function handleCopyDebug() {
+    // Auto-fetch fresh miner data before dumping, so the user doesn't need to
+    // click Refresh first.
+    if (storedKeys && !minerData) {
+      await refreshMinerData();
+    }
+    if (storedKeys && !debugWalletInfo) {
+      await handleRunDebug();
+    }
     const dump = buildDebugDump();
     try {
       await navigator.clipboard.writeText(dump);
@@ -518,6 +636,39 @@ export default function App() {
     } catch {
       // Fallback: show in prompt so user can select all
       window.prompt('Copy this debug info:', dump);
+    }
+  }
+
+  // ═══ Export current keys as JSON ═══
+  // Lets the user save the currently-imported keys before disconnecting
+  // so they can re-import them later (e.g. when testing a different wallet).
+  // Format matches the F12 console output so the same JSON can be pasted back.
+  async function handleExportKeys() {
+    if (!storedKeys) return;
+    const exportObj = {
+      wallet_address: storedKeys.walletAddress,
+      miner_address: storedKeys.minerAddress,
+      keys: {
+        public: storedKeys.publicKey,
+        secret: storedKeys.secretKey,
+      },
+      // Metadata for convenience, ignored by the importer
+      _meta: {
+        walletName: storedKeys.walletName,
+        appId: storedKeys.appId,
+        source: storedKeys.source,
+        exportedAt: new Date().toISOString(),
+      },
+    };
+    const json = JSON.stringify(exportObj, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      addLog('✓ Keys exported to clipboard — paste into a safe note');
+    } catch {
+      window.prompt(
+        'Copy these keys and save them somewhere safe:',
+        json
+      );
     }
   }
 
@@ -530,6 +681,8 @@ export default function App() {
     setAuthState('idle');
     setDebugMinerInfo(null);
     setDebugWalletInfo(null);
+    setMinerData(null);
+    setMinerDataAt(null);
     localStorage.removeItem('lm_wallet_name');
     addLog('Wallet disconnected');
   }
@@ -828,6 +981,14 @@ export default function App() {
               {walletLoading ? '…' : `↻ ${t(lang, 'refresh')}`}
             </button>
             <button
+              className="btn btn--full"
+              onClick={handleExportKeys}
+              style={{ marginTop: 8 }}
+              title="Copy the current keys as JSON so you can re-import them later"
+            >
+              📤 Export keys as JSON
+            </button>
+            <button
               className="btn btn--back btn--full"
               onClick={handleDisconnectWallet}
               style={{ marginTop: 8 }}
@@ -837,6 +998,147 @@ export default function App() {
           </>
         )}
       </div>
+
+      {/* ═══ MINER STATS CARD ═══ */}
+      {isReady && (
+        <div className="card">
+          <div className="card__label">⛏ Miner contract stats</div>
+
+          {!minerData && !minerDataLoading && (
+            <div className="miner-stats-empty">
+              Click below to read the full state of your Miner contract
+              (tapSum, commitTaps, mining duration, pending rewards if any).
+            </div>
+          )}
+
+          {minerDataLoading && (
+            <div className="miner-stats-empty">⏳ Reading miner contract…</div>
+          )}
+
+          {minerData && (
+            <>
+              <div className="miner-stats-grid">
+                {(() => {
+                  // Flexible renderer: works with snake_case or camelCase keys
+                  const get = (obj: any, ...keys: string[]) => {
+                    for (const k of keys) {
+                      if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+                    }
+                    return undefined;
+                  };
+                  const fmt = (v: any): string => {
+                    if (v === undefined || v === null) return '—';
+                    if (typeof v === 'bigint') return v.toString();
+                    if (typeof v === 'object') return JSON.stringify(v);
+                    return String(v);
+                  };
+                  const fmtNackl = (v: any): string => {
+                    if (v === undefined || v === null) return '—';
+                    try {
+                      const n = typeof v === 'bigint' ? Number(v) : parseFloat(String(v));
+                      if (isNaN(n)) return fmt(v);
+                      return (n / 1e9).toFixed(4);
+                    } catch {
+                      return fmt(v);
+                    }
+                  };
+
+                  const tapSum = get(minerData, 'tap_sum', 'tapSum', '_tapSum');
+                  const modifiedTapSum = get(minerData, 'modified_tap_sum', 'modifiedTapSum', '_modifiedTapSum');
+                  const tapSum5m = get(minerData, 'tap_sum_5m', 'tapSum5m', '_tapSum5m');
+                  const commitTaps = get(minerData, 'commit_taps', 'commitTaps', '_commitTaps');
+                  const miningDurSum = get(minerData, 'mining_dur_sum', 'miningDurSum', '_miningDurSum');
+                  const easyComplexity = get(minerData, 'easy_complexity', 'easyComplexity', '_easyComplexity');
+                  const hardComplexity = get(minerData, 'hard_complexity', 'hardComplexity', '_hardComplexity');
+                  const boost = get(minerData, 'boost', '_boost');
+                  const epochStart = get(minerData, 'epoch_start', 'epochStart', '_epochStart');
+                  // Look for any field that might contain pending reward
+                  const pendingReward = get(
+                    minerData,
+                    'pending_reward', 'pendingReward',
+                    'reward', 'accumulated_reward',
+                    'locked_nackl', 'lockedNackl',
+                    'nackl_locked', 'nacklLocked'
+                  );
+
+                  return (
+                    <>
+                      {pendingReward !== undefined && (
+                        <div className="miner-stat miner-stat--highlight">
+                          <div className="miner-stat__label">🔒 PENDING REWARD</div>
+                          <div className="miner-stat__value">{fmtNackl(pendingReward)}</div>
+                        </div>
+                      )}
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Tap sum</div>
+                        <div className="miner-stat__value">{fmt(tapSum)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Modified tap sum</div>
+                        <div className="miner-stat__value">{fmt(modifiedTapSum)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Tap sum 5m</div>
+                        <div className="miner-stat__value">{fmt(tapSum5m)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Commit taps</div>
+                        <div className="miner-stat__value">{fmt(commitTaps)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Mining dur sum</div>
+                        <div className="miner-stat__value">{fmt(miningDurSum)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Boost</div>
+                        <div className="miner-stat__value">{fmt(boost)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Easy complexity</div>
+                        <div className="miner-stat__value">{fmt(easyComplexity)}</div>
+                      </div>
+                      <div className="miner-stat">
+                        <div className="miner-stat__label">Hard complexity</div>
+                        <div className="miner-stat__value">{fmt(hardComplexity)}</div>
+                      </div>
+                      <div className="miner-stat miner-stat--wide">
+                        <div className="miner-stat__label">Epoch start</div>
+                        <div className="miner-stat__value">{fmt(epochStart)}</div>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+
+              <details className="miner-raw">
+                <summary>Raw JSON (for debugging)</summary>
+                <pre className="miner-raw__json">
+                  {JSON.stringify(
+                    minerData,
+                    (_, v) => (typeof v === 'bigint' ? v.toString() + 'n' : v),
+                    2
+                  )}
+                </pre>
+              </details>
+
+              {minerDataAt && (
+                <div className="miner-stats-ts">
+                  Last refresh: {new Date(minerDataAt).toLocaleTimeString()}
+                </div>
+              )}
+            </>
+          )}
+
+          <button
+            className="btn btn--full"
+            onClick={refreshMinerData}
+            disabled={minerDataLoading}
+            style={{ marginTop: 12 }}
+          >
+            {minerDataLoading ? '…' : '↻ Refresh miner stats'}
+          </button>
+        </div>
+      )}
 
       {/* ═══ LAST.FM CARD ═══ */}
       <div className="card">
@@ -914,6 +1216,12 @@ export default function App() {
           <div className="mining-info">
             ℹ️ Rewards are collected automatically when session data is submitted on-chain.
             Check your wallet balance after a few completed sessions.
+          </div>
+          <div className="mining-warning">
+            ⚠️ <strong>Keep the TMA in foreground during mining.</strong> On mobile, iOS/Android
+            throttle background timers, so if you lock the screen or switch app the tap loop
+            slows down or stops mid-session. We acquire a screen wake lock on Start, but
+            the OS can still release it in sleep mode.
           </div>
         </div>
       )}
