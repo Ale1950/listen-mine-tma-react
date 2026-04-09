@@ -755,3 +755,112 @@ a.btn {
   color: var(--warning);
   font-weight: 700;
 }
+
+/* ═══ NACKL LOCKED block in wallet card ═══ */
+.locked-block {
+  background: linear-gradient(135deg,
+    rgba(255, 184, 0, 0.08),
+    rgba(255, 88, 200, 0.06));
+  border: 1px solid rgba(255, 184, 0, 0.25);
+  border-radius: 12px;
+  padding: 14px;
+  margin-top: 12px;
+}
+.locked-block__label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--warning);
+  margin-bottom: 6px;
+}
+.locked-block__count {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 9px;
+  margin-left: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.locked-block__value {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--warning);
+  line-height: 1.1;
+  margin-bottom: 6px;
+}
+.locked-block__hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  word-break: break-all;
+}
+.locked-block__ts {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+}
+
+/* ═══ Linked accounts list in debug panel ═══ */
+.linked-entry {
+  background: var(--bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 8px;
+}
+.linked-entry__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.linked-entry__rank {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--neon-blue);
+  background: rgba(0, 212, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.linked-entry__addr {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-primary);
+  text-decoration: none;
+  word-break: break-all;
+  flex: 1;
+}
+.linked-entry__addr:hover {
+  color: var(--neon-blue);
+}
+.linked-entry__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+.linked-entry__grid > div {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.linked-entry__k {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.4px;
+}
+.linked-entry__v {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.linked-entry__v--highlight {
+  color: var(--warning);
+  font-weight: 700;
+}
