@@ -12,6 +12,6 @@ export default defineConfig({
     target: 'es2020',
   },
   // bee-sdk ships its WASM as bee_sdk_bg.wasm — we serve it from public/
-  // and load it via init({ module_or_path: '/listen-mine-tma/bee_sdk_bg.wasm' })
-  // in services/bee-sdk.ts
+  // and load it via init({ module_or_path: `${import.meta.env.BASE_URL}bee_sdk_bg.wasm` })
+  // in services/bee-sdk.ts (so base path is always in sync with this config).
 });

@@ -2,12 +2,9 @@ import { useState, useEffect, useRef } from 'react';
 import {
   getWalletBalance,
   getDebugAccountInfo,
-  discoverLinkedAccounts,
-  sumLockedNackl,
   explorerAccountUrl,
   type WalletBalance,
   type DebugAccountInfo,
-  type LinkedAccount,
 } from './services/blockchain';
 import { TrackMonitor, validateUser, type LastFmTrack } from './services/lastfm';
 import {
@@ -19,19 +16,25 @@ import {
   startMiningSession,
   stopMining,
   addTap,
-  getMinerData,
   saveMiningKeys,
   loadMiningKeys,
   clearMiningKeys,
-  APP_IDS,
+  APP_ID,
   type StoredMiningKeys,
 } from './services/bee-sdk';
 import { detectLang, isRTL, t, type Lang } from './services/i18n';
 
 type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 'error';
 
-const SESSION_DURATION_MS = 330_000; // 5.5 min, same as official miners
-const TAP_INTERVAL_MS = 4710; // 70 taps per session at 4.710s (matches api_miner.mjs)
+// Session duration passed to Miner.start(duration_ms, callback).
+// Tuned for a ~5 min mining window; the SDK auto-stops at expiry and submits
+// session results to the Miner contract internally.
+const SESSION_DURATION_MS = 330_000;
+
+// Auto-tap cadence: one Miner.add_tap(x,y) every TAP_INTERVAL_MS while the
+// session is active. Tap count of ~70 per session keeps the Merkle tree dense
+// without hammering the WASM module.
+const TAP_INTERVAL_MS = 4710;
 
 export default function App() {
   // ═══ Language ═══
@@ -57,9 +60,6 @@ export default function App() {
   const sessionTimerRef = useRef<number | null>(null);
   const tapCoordsRef = useRef({ x: 200, y: 200 });
   const tapsCountRef = useRef(0);
-  // Screen Wake Lock — prevents iOS/Android from putting the page to sleep
-  // which throttles setInterval and kills the tap loop mid-session.
-  const wakeLockRef = useRef<any>(null);
 
   // ═══ Mining auth ═══
   const [authState, setAuthState] = useState<AuthState>('idle');
@@ -69,125 +69,10 @@ export default function App() {
     () => loadMiningKeys()
   );
 
-  // ═══ Import keys form (JSON paste mode) ═══
-  const [showImportForm, setShowImportForm] = useState(false);
-  const [importMode, setImportMode] = useState<'json' | 'manual'>('json');
-  const [importJson, setImportJson] = useState('');
-  const [importWalletAddr, setImportWalletAddr] = useState('');
-  const [importMinerAddr, setImportMinerAddr] = useState('');
-  const [importPublic, setImportPublic] = useState('');
-  const [importSecret, setImportSecret] = useState('');
-  const [importAppId, setImportAppId] = useState<string>(APP_IDS.popits);
-
   // ═══ Debug panel ═══
   const [showDebug, setShowDebug] = useState(false);
   const [debugMinerInfo, setDebugMinerInfo] = useState<DebugAccountInfo | null>(null);
-  const [debugWalletInfo, setDebugWalletInfo] = useState<DebugAccountInfo | null>(null);
   const [debugLoading, setDebugLoading] = useState(false);
-
-  // ═══ Miner contract state (tapSum, commitTaps, pending rewards, etc) ═══
-  // Read via bee-sdk.getMinerData() which returns the full contract account data.
-  // We re-read it every 30s while mining is active to track accumulated work.
-  const [minerData, setMinerData] = useState<any>(null);
-  const [minerDataLoading, setMinerDataLoading] = useState(false);
-  const [minerDataAt, setMinerDataAt] = useState<number | null>(null);
-
-  // ═══ NACKL LOCKED — manual baseline tracker ═══
-  // The locked NACKL are stored as state variables inside the Mamaboard
-  // contract which requires the Mamaboard ABI to decode (not public yet).
-  // Instead we use a MANUAL tracker: the user inputs the locked NACKL value
-  // they see in the AN Wallet app, we save it with a timestamp, and show
-  // the delta between the latest two samples. This gives a clean, honest
-  // measurement of mining rewards growth, independent of which app is mining.
-  interface LockedSample {
-    value: number;
-    timestamp: number;  // ms
-    note?: string;
-  }
-  const LOCKED_SAMPLES_KEY = 'lm_locked_samples_v1';
-  const [lockedSamples, setLockedSamples] = useState<LockedSample[]>(() => {
-    try {
-      const raw = localStorage.getItem(LOCKED_SAMPLES_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  });
-  const [newSampleValue, setNewSampleValue] = useState('');
-  const [newSampleNote, setNewSampleNote] = useState('');
-
-  function saveLockedSamples(next: LockedSample[]) {
-    localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
-    setLockedSamples(next);
-  }
-
-  function handleAddLockedSample() {
-    const v = parseFloat(newSampleValue.replace(/[,\s]/g, '').replace(',', '.'));
-    if (isNaN(v) || v < 0) {
-      addLog('✗ Invalid NACKL value');
-      return;
-    }
-    const sample: LockedSample = {
-      value: v,
-      timestamp: Date.now(),
-      note: newSampleNote.trim() || undefined,
-    };
-    const next = [sample, ...lockedSamples].slice(0, 20); // keep last 20
-    saveLockedSamples(next);
-    setNewSampleValue('');
-    setNewSampleNote('');
-    addLog(`✓ Locked NACKL sample saved: ${v.toFixed(2)}`);
-  }
-
-  function handleDeleteLockedSample(idx: number) {
-    const next = lockedSamples.filter((_, i) => i !== idx);
-    saveLockedSamples(next);
-  }
-
-  // Compute delta between first sample (baseline) and latest sample
-  const lockedStats = (() => {
-    if (lockedSamples.length < 1) return null;
-    const latest = lockedSamples[0];
-    const oldest = lockedSamples[lockedSamples.length - 1];
-    if (lockedSamples.length === 1) {
-      return {
-        baseline: oldest,
-        latest,
-        delta: 0,
-        elapsedMs: 0,
-        rateNacklPerHour: 0,
-      };
-    }
-    const delta = latest.value - oldest.value;
-    const elapsedMs = latest.timestamp - oldest.timestamp;
-    const hours = elapsedMs / 3_600_000;
-    const rate = hours > 0 ? delta / hours : 0;
-    return {
-      baseline: oldest,
-      latest,
-      delta,
-      elapsedMs,
-      rateNacklPerHour: rate,
-    };
-  })();
-
-  function formatDuration(ms: number): string {
-    if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
-    if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
-    const h = Math.floor(ms / 3_600_000);
-    const m = Math.floor((ms % 3_600_000) / 60_000);
-    return m > 0 ? `${h}h ${m}m` : `${h}h`;
-  }
-
-  // ═══ NACKL LOCKED — discovered via linked accounts (kept for debug panel) ═══
-  // The wallet shows only FREE NACKL. Mining rewards accumulate as LOCKED
-  // NACKL inside the Mamaboard contract (one per app). We discover all
-  // contracts the wallet has sent messages to for diagnostics.
-  const [linkedAccounts, setLinkedAccounts] = useState<LinkedAccount[] | null>(null);
-  const [linkedLoading, setLinkedLoading] = useState(false);
-  const [linkedAt, setLinkedAt] = useState<number | null>(null);
 
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
@@ -216,10 +101,13 @@ export default function App() {
   }, [lang]);
 
   // ═══ Load wallet balance on mount if we have a stored wallet ═══
+  // NOTE: in the official Bee Engine flow we only persist the miner contract
+  // address. Querying its balance is mostly informational (miner contracts
+  // don't hold NACKL). The real wallet balance lookup will be wired up as
+  // part of the NACKL Locked tracker (Request 5).
   useEffect(() => {
     if (storedKeys) {
-      const addrForBalance = storedKeys.walletAddress || storedKeys.minerAddress;
-      refreshBalance(addrForBalance);
+      refreshBalance(storedKeys.minerAddress);
     }
   }, []);
 
@@ -256,62 +144,6 @@ export default function App() {
     }
   }
 
-  // ═══ Linked accounts discovery & locked NACKL ═══
-  // Calls discoverLinkedAccounts() which:
-  //  1. Queries the wallet's outbound internal messages (IntOut)
-  //  2. Extracts unique destination addresses (these are the contracts the wallet interacts with)
-  //  3. Batch-fetches balance_other for each
-  //  4. Sums NACKL (currency 1) across all of them → this is "LOCKED NACKL"
-  // The top result by NACKL balance is typically the Mamaboard.
-  async function refreshLinkedAccounts(walletAddr?: string) {
-    const addr = walletAddr || storedKeys?.walletAddress;
-    if (!addr) return;
-    setLinkedLoading(true);
-    addLog('🔍 Discovering linked accounts…');
-    try {
-      const accounts = await discoverLinkedAccounts(addr);
-      setLinkedAccounts(accounts);
-      setLinkedAt(Date.now());
-      const total = sumLockedNackl(accounts);
-      addLog(`✓ Found ${accounts.length} linked accounts, total NACKL locked: ${total.toFixed(4)}`);
-    } catch (e: any) {
-      addLog(`✗ Linked accounts discovery failed: ${e.message}`);
-    } finally {
-      setLinkedLoading(false);
-    }
-  }
-
-  // ═══ Miner contract data refresh ═══
-  // Calls bee-sdk.getMinerData() which reads the full contract state:
-  // _tapSum, _modifiedTapSum, _commitTaps, _miningDurSum, _seed, _epochStart, etc.
-  async function refreshMinerData() {
-    setMinerDataLoading(true);
-    try {
-      const data = await getMinerData();
-      setMinerData(data);
-      setMinerDataAt(Date.now());
-      if (data) {
-        addLog('✓ Miner stats refreshed');
-      } else {
-        addLog('✗ getMinerData returned null');
-      }
-    } catch (e: any) {
-      addLog(`Miner stats error: ${e.message}`);
-    } finally {
-      setMinerDataLoading(false);
-    }
-  }
-
-  // Auto-refresh miner stats every 30s while mining is active
-  useEffect(() => {
-    if (!miningActive) return;
-    const id = window.setInterval(() => {
-      refreshMinerData();
-    }, 30000);
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [miningActive]);
-
   // ═══ Handlers ═══
   async function handleSetLastfm() {
     if (!lastfmInput.trim()) return;
@@ -347,43 +179,37 @@ export default function App() {
     addLog('Generating mining keys…');
 
     try {
-      // Step 1: generate mining keys (uses DEFAULT_APP_ID = popits)
+      // Step 1 — generate mining keys for our APP_ID
       const keys = await generateMiningKeys();
       addLog(`Mining keys generated. Public: ${keys.publicKey.substring(0, 16)}…`);
 
-      // Step 2: resolve miner address from wallet name
+      // Step 2 — resolve miner contract address from wallet name
       addLog(`Resolving miner address for "${name}"…`);
       const minerAddress = await resolveMinerAddress(name);
       addLog(`Miner address: ${minerAddress.substring(0, 24)}…`);
 
-      // Step 3: show deep_link to user
+      // Step 3 — present deep_link to user (QR + button) for AN Wallet confirmation
       setDeepLink(keys.deepLink);
       setAuthState('awaiting');
       addLog('Open AN Wallet via the button below to confirm');
 
-      // Step 4: poll for propagation
+      // Step 4 — poll for on-chain propagation of the authorization
       setAuthState('propagating');
       addLog('Waiting for on-chain confirmation…');
-      await waitForAuthorization(minerAddress, keys.publicKey, APP_IDS.popits, 180, 2000);
+      await waitForAuthorization(minerAddress, keys.publicKey, 180, 2000);
       addLog('✓ Mining keys propagated on-chain');
 
-      // Step 5: create miner instance
-      await createMiner(minerAddress, keys.publicKey, keys.secretKey, APP_IDS.popits);
+      // Step 5 — create the Miner instance
+      await createMiner(minerAddress, keys.publicKey, keys.secretKey);
       addLog('✓ Miner instance ready');
 
-      // Save keys for next sessions
-      // NOTE: In the full auth flow we don't have the actual wallet address,
-      // only the miner contract address. We use minerAddress as a fallback for
-      // balance queries (will show 0 NACKL because miner contracts don't hold tokens).
-      // Users should use the JSON import path which includes wallet_address.
+      // Persist for next sessions (secret stays in localStorage, browser-only)
       const stored: StoredMiningKeys = {
         walletName: name,
-        walletAddress: minerAddress,
         minerAddress,
         publicKey: keys.publicKey,
         secretKey: keys.secretKey,
-        appId: APP_IDS.popits,
-        source: 'generated',
+        appId: APP_ID,
         authorizedAt: Date.now(),
       };
       saveMiningKeys(stored);
@@ -391,9 +217,7 @@ export default function App() {
       setAuthState('ready');
       setDeepLink('');
 
-      // Refresh balance and miner stats
       refreshBalance(minerAddress);
-      refreshMinerData();
     } catch (e: any) {
       setAuthState('error');
       setAuthError(e.message || 'Unknown error');
@@ -401,115 +225,18 @@ export default function App() {
     }
   }
 
-  // ═══ IMPORT KEYS MODE — bypass the full auth flow ═══
-  // ═══ IMPORT KEYS MODE — bypass the full auth flow ═══
-  // Two input modes:
-  //   'json'   → paste F12 console output (full JSON)
-  //   'manual' → fill in each field by hand
-  async function handleImportKeys() {
-    const name = walletNameInput.trim() || 'imported_wallet';
-    const appId = importAppId;
-
-    let walletAddr = '';
-    let minerAddr = '';
-    let pub = '';
-    let sec = '';
-
-    if (importMode === 'json') {
-      const rawJson = importJson.trim();
-      if (!rawJson) {
-        addLog('✗ Paste the JSON from the F12 console first');
-        return;
-      }
-      let parsed: any;
-      try {
-        parsed = JSON.parse(rawJson);
-      } catch (e: any) {
-        addLog(`✗ Invalid JSON: ${e.message}`);
-        return;
-      }
-      walletAddr = String(parsed?.wallet_address || '').trim();
-      minerAddr = String(parsed?.miner_address || '').trim();
-      pub = String(parsed?.keys?.public || '').trim();
-      sec = String(parsed?.keys?.secret || '').trim();
-    } else {
-      walletAddr = importWalletAddr.trim();
-      minerAddr = importMinerAddr.trim();
-      pub = importPublic.trim();
-      sec = importSecret.trim();
-    }
-
-    const missing: string[] = [];
-    if (!walletAddr) missing.push('wallet_address');
-    if (!minerAddr) missing.push('miner_address');
-    if (!pub) missing.push('public');
-    if (!sec) missing.push('secret');
-    if (missing.length > 0) {
-      addLog(`✗ Missing fields: ${missing.join(', ')}`);
-      return;
-    }
-
-    if (!minerAddr.startsWith('0:') || !walletAddr.startsWith('0:')) {
-      addLog('✗ Addresses must start with 0:');
-      return;
-    }
-
-    localStorage.setItem('lm_wallet_name', name);
-    setAuthState('generating');
-    addLog(`Importing keys (APP_ID=${appId.substring(0, 10)}…${appId.substring(appId.length - 4)})`);
-    addLog(`Wallet: ${walletAddr.substring(0, 14)}…${walletAddr.substring(walletAddr.length - 6)}`);
-    addLog(`Miner:  ${minerAddr.substring(0, 14)}…${minerAddr.substring(minerAddr.length - 6)}`);
-
-    try {
-      await createMiner(minerAddr, pub, sec, appId);
-      addLog('✓ Miner instance created with imported keys');
-
-      const stored: StoredMiningKeys = {
-        walletName: name,
-        walletAddress: walletAddr,
-        minerAddress: minerAddr,
-        publicKey: pub,
-        secretKey: sec,
-        appId,
-        source: 'imported',
-        authorizedAt: Date.now(),
-      };
-      saveMiningKeys(stored);
-      setStoredKeys(stored);
-      setAuthState('ready');
-      setShowImportForm(false);
-      setImportJson('');
-      setImportWalletAddr('');
-      setImportMinerAddr('');
-      setImportPublic('');
-      setImportSecret('');
-
-      refreshBalance(walletAddr);
-      refreshMinerData();
-      refreshLinkedAccounts(walletAddr);
-    } catch (e: any) {
-      setAuthState('error');
-      setAuthError(e.message || 'Unknown error');
-      addLog(`✗ Import failed: ${e.message}`);
-    }
-  }
-
   async function handleResumeFromStored() {
     if (!storedKeys) return;
-    addLog(`Resuming with stored keys (${storedKeys.source})…`);
+    addLog('Resuming with stored keys…');
     try {
       await createMiner(
         storedKeys.minerAddress,
         storedKeys.publicKey,
-        storedKeys.secretKey,
-        storedKeys.appId
+        storedKeys.secretKey
       );
       setAuthState('ready');
       addLog('✓ Miner restored');
-      const addrForBalance = storedKeys.walletAddress || storedKeys.minerAddress;
-      refreshBalance(addrForBalance);
-      refreshMinerData();
-      refreshLinkedAccounts(addrForBalance);
+      refreshBalance(storedKeys.minerAddress);
     } catch (e: any) {
       addLog(`Restore failed: ${e.message}`);
       clearMiningKeys();
@@ -541,36 +268,16 @@ export default function App() {
     tapsCountRef.current = 0;
     addLog(`✓ Session started (${SESSION_DURATION_MS / 1000}s, tap every ${TAP_INTERVAL_MS / 1000}s)`);
 
-    // Request Screen Wake Lock to prevent iOS/Android from throttling timers
-    // when the screen dims. Gracefully skipped if API is unavailable.
-    (async () => {
-      try {
-        const nav: any = navigator;
-        if (nav.wakeLock && typeof nav.wakeLock.request === 'function') {
-          wakeLockRef.current = await nav.wakeLock.request('screen');
-          addLog('🔒 Screen wake lock acquired (screen will stay on)');
-          wakeLockRef.current.addEventListener?.('release', () => {
-            addLog('⚠️ Wake lock released by system');
-          });
-        } else {
-          addLog('⚠️ Wake Lock API unavailable — keep the TMA in foreground');
-        }
-      } catch (e: any) {
-        addLog(`⚠️ Wake lock failed: ${e.message || 'unknown'}`);
-      }
-    })();
-
     // Reset coordinate drift starting point
     tapCoordsRef.current = {
       x: 100 + Math.floor(Math.random() * 200),
       y: 100 + Math.floor(Math.random() * 300),
     };
 
-    // Start auto-tap loop — one tap every TAP_INTERVAL_MS (4.710s)
-    // This matches the official api_miner.mjs script behavior (70 taps / session)
+    // Start auto-tap loop — one Miner.add_tap(x,y) every TAP_INTERVAL_MS.
+    // Coordinates are app-defined (per Bee Engine docs); a random-walk drift
+    // keeps them varied across the session.
     tapTimerRef.current = window.setInterval(() => {
-      // Random-walk drift: small movement each tap for varied coordinates
-      // (from WASM analysis: modifiedTapSum rewards varied coords over fixed ones)
       const c = tapCoordsRef.current;
       c.x = Math.max(20, Math.min(280, c.x + (Math.random() - 0.5) * 30));
       c.y = Math.max(20, Math.min(380, c.y + (Math.random() - 0.5) * 30));
@@ -605,50 +312,20 @@ export default function App() {
       window.clearTimeout(sessionTimerRef.current);
       sessionTimerRef.current = null;
     }
-    // Release wake lock
-    if (wakeLockRef.current) {
-      try {
-        wakeLockRef.current.release?.();
-      } catch {}
-      wakeLockRef.current = null;
-    }
     stopMining();
     setMiningActive(false);
     addLog(`Session stopped. Total taps: ${tapsCountRef.current}`);
   }
 
-  // Re-acquire wake lock when the TMA comes back to foreground mid-session
-  // (iOS/Android auto-release it when the page loses visibility).
-  useEffect(() => {
-    if (!miningActive) return;
-    const handleVisibility = async () => {
-      if (document.visibilityState === 'visible' && miningActive && !wakeLockRef.current) {
-        try {
-          const nav: any = navigator;
-          if (nav.wakeLock?.request) {
-            wakeLockRef.current = await nav.wakeLock.request('screen');
-            addLog('🔒 Wake lock re-acquired after returning to foreground');
-          }
-        } catch {}
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [miningActive]);
-
-  // ═══ Debug runner — fetches on-chain state for wallet + miner ═══
+  // ═══ Debug runner — fetches on-chain state for the miner contract ═══
   async function handleRunDebug() {
     if (!storedKeys) return;
     setDebugLoading(true);
-    addLog('Running debug queries…');
+    addLog('Running debug query…');
     try {
-      const [walletInfo, minerInfo] = await Promise.all([
-        getDebugAccountInfo(storedKeys.walletAddress || storedKeys.minerAddress),
-        getDebugAccountInfo(storedKeys.minerAddress),
-      ]);
-      setDebugWalletInfo(walletInfo);
+      const minerInfo = await getDebugAccountInfo(storedKeys.minerAddress);
       setDebugMinerInfo(minerInfo);
-      addLog(`✓ Debug: wallet acc_type=${walletInfo.accType}, miner acc_type=${minerInfo.accType}`);
+      addLog(`✓ Debug: miner acc_type=${minerInfo.accType}`);
     } catch (e: any) {
       addLog(`✗ Debug failed: ${e.message}`);
     } finally {
@@ -674,12 +351,10 @@ export default function App() {
     if (storedKeys) {
       lines.push('── STORED KEYS ──');
       lines.push(`walletName: ${storedKeys.walletName}`);
-      lines.push(`walletAddress: ${storedKeys.walletAddress}`);
       lines.push(`minerAddress: ${storedKeys.minerAddress}`);
       lines.push(`publicKey: ${storedKeys.publicKey.substring(0, 16)}…${storedKeys.publicKey.substring(storedKeys.publicKey.length - 8)}`);
       lines.push(`secretKey: [${storedKeys.secretKey.length} chars, hidden]`);
       lines.push(`appId: ${storedKeys.appId}`);
-      lines.push(`source: ${storedKeys.source}`);
       lines.push(`authorizedAt: ${new Date(storedKeys.authorizedAt).toISOString()}`);
       lines.push('');
     }
@@ -696,18 +371,6 @@ export default function App() {
       if (walletBalance.error) lines.push(`error: ${walletBalance.error}`);
       lines.push('');
     }
-    if (debugWalletInfo) {
-      lines.push('── WALLET DEBUG QUERY ──');
-      lines.push(`network: ${debugWalletInfo.network}`);
-      lines.push(`accType: ${debugWalletInfo.accType}`);
-      lines.push(`balance (VMSHELL nano): ${debugWalletInfo.balance}`);
-      lines.push(`balanceOther: ${JSON.stringify(debugWalletInfo.balanceOther)}`);
-      lines.push(`codeHash: ${debugWalletInfo.codeHash}`);
-      lines.push(`lastPaid: ${debugWalletInfo.lastPaid}`);
-      lines.push(`dappId: ${debugWalletInfo.dappId}`);
-      if (debugWalletInfo.error) lines.push(`error: ${debugWalletInfo.error}`);
-      lines.push('');
-    }
     if (debugMinerInfo) {
       lines.push('── MINER CONTRACT DEBUG QUERY ──');
       lines.push(`network: ${debugMinerInfo.network}`);
@@ -720,54 +383,6 @@ export default function App() {
       if (debugMinerInfo.error) lines.push(`error: ${debugMinerInfo.error}`);
       lines.push('');
     }
-    if (minerData) {
-      lines.push('── MINER STATS (getMinerData raw) ──');
-      lines.push(
-        JSON.stringify(
-          minerData,
-          (_, v) => (typeof v === 'bigint' ? v.toString() + 'n' : v),
-          2
-        )
-      );
-      lines.push('');
-      if (minerDataAt) {
-        lines.push(`lastRefresh: ${new Date(minerDataAt).toISOString()}`);
-        lines.push('');
-      }
-    } else {
-      lines.push('── MINER STATS ──');
-      lines.push('(not loaded — click "Refresh miner stats" first)');
-      lines.push('');
-    }
-    if (lockedSamples.length > 0) {
-      lines.push(`── NACKL LOCKED TRACKER (${lockedSamples.length} samples) ──`);
-      for (let i = 0; i < lockedSamples.length; i++) {
-        const s = lockedSamples[i];
-        lines.push(`[${i}] ${new Date(s.timestamp).toISOString()}  ${s.value.toFixed(4)}${s.note ? `  — ${s.note}` : ''}`);
-      }
-      if (lockedStats && lockedStats.elapsedMs > 0) {
-        lines.push(`delta: ${lockedStats.delta >= 0 ? '+' : ''}${lockedStats.delta.toFixed(4)} NACKL over ${formatDuration(lockedStats.elapsedMs)}`);
-        lines.push(`rate: ${lockedStats.rateNacklPerHour.toFixed(4)} NACKL/hour`);
-      }
-      lines.push('');
-    }
-    if (linkedAccounts) {
-      lines.push(`── LINKED ACCOUNTS (${linkedAccounts.length}) ──`);
-      lines.push(`totalLockedNackl: ${sumLockedNackl(linkedAccounts).toFixed(4)}`);
-      for (let i = 0; i < linkedAccounts.length; i++) {
-        const a = linkedAccounts[i];
-        lines.push(`#${i + 1} ${a.address}`);
-        lines.push(`   nackl=${a.nacklBalance.toFixed(4)} shell=${a.shellBalance.toFixed(4)} usdc=${a.usdcBalance.toFixed(4)} vmShell=${a.vmShell.toFixed(4)}`);
-        lines.push(`   msgs=${a.messageCount} accType=${a.accType} dappId=${a.dappId || '—'}`);
-        lines.push(`   codeHash=${a.codeHash || '—'}`);
-      }
-      if (linkedAt) lines.push(`lastScan: ${new Date(linkedAt).toISOString()}`);
-      lines.push('');
-    } else {
-      lines.push('── LINKED ACCOUNTS ──');
-      lines.push('(not scanned — click "Discover linked accounts" first)');
-      lines.push('');
-    }
     lines.push('── LAST 40 LOG LINES ──');
     lines.push(...logs.slice(0, 40));
     lines.push('');
@@ -776,19 +391,6 @@ export default function App() {
   }
 
   async function handleCopyDebug() {
-    // Auto-fetch fresh miner data before dumping, so the user doesn't need to
-    // click Refresh first.
-    if (storedKeys && !minerData) {
-      await refreshMinerData();
-    }
-    if (storedKeys && !debugWalletInfo) {
-      await handleRunDebug();
-    }
-    if (storedKeys && !linkedAccounts) {
-      await refreshLinkedAccounts(
-        storedKeys.walletAddress || storedKeys.minerAddress
-      );
-    }
     const dump = buildDebugDump();
     try {
       await navigator.clipboard.writeText(dump);
@@ -796,39 +398,6 @@ export default function App() {
     } catch {
       // Fallback: show in prompt so user can select all
       window.prompt('Copy this debug info:', dump);
-    }
-  }
-
-  // ═══ Export current keys as JSON ═══
-  // Lets the user save the currently-imported keys before disconnecting
-  // so they can re-import them later (e.g. when testing a different wallet).
-  // Format matches the F12 console output so the same JSON can be pasted back.
-  async function handleExportKeys() {
-    if (!storedKeys) return;
-    const exportObj = {
-      wallet_address: storedKeys.walletAddress,
-      miner_address: storedKeys.minerAddress,
-      keys: {
-        public: storedKeys.publicKey,
-        secret: storedKeys.secretKey,
-      },
-      // Metadata for convenience, ignored by the importer
-      _meta: {
-        walletName: storedKeys.walletName,
-        appId: storedKeys.appId,
-        source: storedKeys.source,
-        exportedAt: new Date().toISOString(),
-      },
-    };
-    const json = JSON.stringify(exportObj, null, 2);
-    try {
-      await navigator.clipboard.writeText(json);
-      addLog('✓ Keys exported to clipboard — paste into a safe note');
-    } catch {
-      window.prompt(
-        'Copy these keys and save them somewhere safe:',
-        json
-      );
     }
   }
 
@@ -840,11 +409,6 @@ export default function App() {
     setWalletNameInput('');
     setAuthState('idle');
     setDebugMinerInfo(null);
-    setDebugWalletInfo(null);
-    setMinerData(null);
-    setMinerDataAt(null);
-    setLinkedAccounts(null);
-    setLinkedAt(null);
     localStorage.removeItem('lm_wallet_name');
     addLog('Wallet disconnected');
   }
@@ -877,143 +441,14 @@ export default function App() {
               style={{ marginBottom: 8 }}
             />
 
-            {authState === 'idle' && !showImportForm && (
-              <>
-                <button
-                  className="btn btn--primary btn--full"
-                  onClick={handleAuthorizeMining}
-                  disabled={!walletNameInput.trim()}
-                >
-                  {t(lang, 'authMining')}
-                </button>
-                <button
-                  className="link-btn"
-                  onClick={() => setShowImportForm(true)}
-                  style={{ marginTop: 10 }}
-                >
-                  I already have mining keys (advanced) →
-                </button>
-              </>
-            )}
-
-            {authState === 'idle' && showImportForm && (
-              <div className="import-form">
-                <div className="import-form__title">Import existing mining keys</div>
-                <div className="import-form__hint">
-                  Paste the JSON output from the F12 console trick (Batteries / Popits / Ludo).
-                  Everything is extracted automatically — wallet address, miner address, public &amp; secret keys.
-                  Skips the AN Wallet authorization dialog.
-                </div>
-
-                {/* Mode tabs */}
-                <div className="mode-tabs">
-                  <button
-                    className={`mode-tab ${importMode === 'json' ? 'mode-tab--active' : ''}`}
-                    onClick={() => setImportMode('json')}
-                  >
-                    📋 Paste JSON
-                  </button>
-                  <button
-                    className={`mode-tab ${importMode === 'manual' ? 'mode-tab--active' : ''}`}
-                    onClick={() => setImportMode('manual')}
-                  >
-                    ✏️ Enter manually
-                  </button>
-                </div>
-
-                {importMode === 'json' && (
-                  <>
-                    <label className="import-label">JSON from F12 console</label>
-                    <textarea
-                      className="input-field import-textarea"
-                      placeholder='{"wallet_address":"0:...","miner_address":"0:...","keys":{"public":"...","secret":"..."}}'
-                      value={importJson}
-                      onChange={e => setImportJson(e.target.value)}
-                      rows={6}
-                    />
-                  </>
-                )}
-
-                {importMode === 'manual' && (
-                  <>
-                    <label className="import-label">Wallet address</label>
-                    <input
-                      type="text"
-                      className="input-field"
-                      placeholder="0:..."
-                      value={importWalletAddr}
-                      onChange={e => setImportWalletAddr(e.target.value)}
-                    />
-
-                    <label className="import-label">Miner address</label>
-                    <input
-                      type="text"
-                      className="input-field"
-                      placeholder="0:..."
-                      value={importMinerAddr}
-                      onChange={e => setImportMinerAddr(e.target.value)}
-                    />
-
-                    <label className="import-label">Public key</label>
-                    <input
-                      type="text"
-                      className="input-field"
-                      placeholder="64-char hex string"
-                      value={importPublic}
-                      onChange={e => setImportPublic(e.target.value)}
-                    />
-
-                    <label className="import-label">
-                      Secret key (stays in your browser)
-                    </label>
-                    <input
-                      type="password"
-                      className="input-field"
-                      placeholder="64-char hex string — never shared"
-                      value={importSecret}
-                      onChange={e => setImportSecret(e.target.value)}
-                    />
-                  </>
-                )}
-
-                <label className="import-label">Source app (determines APP_ID)</label>
-                <select
-                  className="input-field"
-                  value={importAppId}
-                  onChange={e => setImportAppId(e.target.value)}
-                >
-                  <option value={APP_IDS.popits}>Popits (0x…0001)</option>
-                  <option value={APP_IDS.batteries}>Batteries (0x…0002)</option>
-                </select>
-
-                <div className="import-hint-small">
-                  ⚠️ Match this to the TMA where you extracted the keys. Using the wrong APP_ID
-                  causes the Miner contract to reject the taps.
-                </div>
-
-                <button
-                  className="btn btn--primary btn--full"
-                  onClick={handleImportKeys}
-                  disabled={
-                    importMode === 'json'
-                      ? !importJson.trim()
-                      : !importWalletAddr.trim() ||
-                        !importMinerAddr.trim() ||
-                        !importPublic.trim() ||
-                        !importSecret.trim()
-                  }
-                  style={{ marginTop: 12 }}
-                >
-                  Load miner with imported keys
-                </button>
-                <button
-                  className="link-btn"
-                  onClick={() => setShowImportForm(false)}
-                  style={{ marginTop: 8 }}
-                >
-                  ← Back to standard authorization
-                </button>
-              </div>
+            {authState === 'idle' && (
+              <button
+                className="btn btn--primary btn--full"
+                onClick={handleAuthorizeMining}
+                disabled={!walletNameInput.trim()}
+              >
+                {t(lang, 'authMining')}
+              </button>
             )}
 
             {authState === 'generating' && (
@@ -1077,23 +512,6 @@ export default function App() {
             </div>
 
             <div className="addr-row">
-              <div className="addr-label">Wallet</div>
-              <div className="addr-value">
-                {(storedKeys.walletAddress || storedKeys.minerAddress).substring(0, 10)}…
-                {(storedKeys.walletAddress || storedKeys.minerAddress).substring(
-                  (storedKeys.walletAddress || storedKeys.minerAddress).length - 8
-                )}
-              </div>
-              <a
-                className="addr-link"
-                href={explorerAccountUrl(storedKeys.walletAddress || storedKeys.minerAddress)}
-                target="_blank"
-                rel="noreferrer"
-              >
-                explorer ↗
-              </a>
-            </div>
-            <div className="addr-row">
               <div className="addr-label">Miner</div>
               <div className="addr-value">
                 {storedKeys.minerAddress.substring(0, 10)}…
@@ -1132,146 +550,13 @@ export default function App() {
               </div>
             )}
 
-            {/* ═══ NACKL LOCKED — manual baseline tracker ═══ */}
-            <div className="locked-block">
-              <div className="locked-block__label">
-                🔒 NACKL LOCKED TRACKER
-              </div>
-              <div className="locked-block__hint">
-                The locked NACKL is stored inside the Mamaboard/Wallet contract
-                as a private state variable that needs the contract ABI to decode
-                (not yet publicly available). Use this tracker to manually sample
-                the value from your AN Wallet app and measure mining rewards growth.
-              </div>
-
-              {lockedStats && lockedStats.latest && (
-                <div className="locked-current">
-                  <div className="locked-current__label">Latest sample</div>
-                  <div className="locked-current__value">
-                    {lockedStats.latest.value.toLocaleString('en-US', {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </div>
-                  <div className="locked-current__ts">
-                    {new Date(lockedStats.latest.timestamp).toLocaleString()}
-                    {lockedStats.latest.note && ` — ${lockedStats.latest.note}`}
-                  </div>
-                </div>
-              )}
-
-              {lockedStats && lockedStats.elapsedMs > 0 && (
-                <div className="locked-delta">
-                  <div className="locked-delta__row">
-                    <span className="locked-delta__k">Elapsed</span>
-                    <span className="locked-delta__v">
-                      {formatDuration(lockedStats.elapsedMs)}
-                    </span>
-                  </div>
-                  <div className="locked-delta__row">
-                    <span className="locked-delta__k">Δ NACKL</span>
-                    <span
-                      className={`locked-delta__v ${
-                        lockedStats.delta >= 0 ? 'locked-delta__v--pos' : 'locked-delta__v--neg'
-                      }`}
-                    >
-                      {lockedStats.delta >= 0 ? '+' : ''}
-                      {lockedStats.delta.toFixed(4)}
-                    </span>
-                  </div>
-                  <div className="locked-delta__row">
-                    <span className="locked-delta__k">Rate</span>
-                    <span
-                      className={`locked-delta__v ${
-                        lockedStats.rateNacklPerHour >= 0
-                          ? 'locked-delta__v--pos'
-                          : 'locked-delta__v--neg'
-                      }`}
-                    >
-                      {lockedStats.rateNacklPerHour >= 0 ? '+' : ''}
-                      {lockedStats.rateNacklPerHour.toFixed(2)} NACKL/h
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              <div className="locked-add">
-                <label className="locked-add__label">Add new sample</label>
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="e.g. 635218.89"
-                  value={newSampleValue}
-                  onChange={e => setNewSampleValue(e.target.value)}
-                  inputMode="decimal"
-                />
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="Note (optional) — e.g. 'before Listen & Mine test'"
-                  value={newSampleNote}
-                  onChange={e => setNewSampleNote(e.target.value)}
-                  style={{ marginTop: 6 }}
-                />
-                <button
-                  className="btn btn--primary btn--full"
-                  onClick={handleAddLockedSample}
-                  disabled={!newSampleValue.trim()}
-                  style={{ marginTop: 8 }}
-                >
-                  ➕ Save sample
-                </button>
-              </div>
-
-              {lockedSamples.length > 1 && (
-                <details className="locked-history">
-                  <summary>History ({lockedSamples.length} samples)</summary>
-                  {lockedSamples.map((s, i) => (
-                    <div key={s.timestamp} className="locked-history__row">
-                      <div className="locked-history__main">
-                        <span className="locked-history__val">
-                          {s.value.toLocaleString('en-US', {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })}
-                        </span>
-                        <span className="locked-history__ts">
-                          {new Date(s.timestamp).toLocaleString()}
-                        </span>
-                      </div>
-                      {s.note && (
-                        <div className="locked-history__note">{s.note}</div>
-                      )}
-                      <button
-                        className="locked-history__del"
-                        onClick={() => handleDeleteLockedSample(i)}
-                        title="Delete"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                </details>
-              )}
-            </div>
-
             <button
               className="btn btn--full"
-              onClick={() =>
-                refreshBalance(storedKeys.walletAddress || storedKeys.minerAddress)
-              }
+              onClick={() => refreshBalance(storedKeys.minerAddress)}
               disabled={walletLoading}
               style={{ marginTop: 12 }}
             >
               {walletLoading ? '…' : `↻ ${t(lang, 'refresh')}`}
-            </button>
-            <button
-              className="btn btn--full"
-              onClick={handleExportKeys}
-              style={{ marginTop: 8 }}
-              title="Copy the current keys as JSON so you can re-import them later"
-            >
-              📤 Export keys as JSON
             </button>
             <button
               className="btn btn--back btn--full"
@@ -1283,147 +568,6 @@ export default function App() {
           </>
         )}
       </div>
-
-      {/* ═══ MINER STATS CARD ═══ */}
-      {isReady && (
-        <div className="card">
-          <div className="card__label">⛏ Miner contract stats</div>
-
-          {!minerData && !minerDataLoading && (
-            <div className="miner-stats-empty">
-              Click below to read the full state of your Miner contract
-              (tapSum, commitTaps, mining duration, pending rewards if any).
-            </div>
-          )}
-
-          {minerDataLoading && (
-            <div className="miner-stats-empty">⏳ Reading miner contract…</div>
-          )}
-
-          {minerData && (
-            <>
-              <div className="miner-stats-grid">
-                {(() => {
-                  // Flexible renderer: works with snake_case or camelCase keys
-                  const get = (obj: any, ...keys: string[]) => {
-                    for (const k of keys) {
-                      if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
-                    }
-                    return undefined;
-                  };
-                  const fmt = (v: any): string => {
-                    if (v === undefined || v === null) return '—';
-                    if (typeof v === 'bigint') return v.toString();
-                    if (typeof v === 'object') return JSON.stringify(v);
-                    return String(v);
-                  };
-                  const fmtNackl = (v: any): string => {
-                    if (v === undefined || v === null) return '—';
-                    try {
-                      const n = typeof v === 'bigint' ? Number(v) : parseFloat(String(v));
-                      if (isNaN(n)) return fmt(v);
-                      return (n / 1e9).toFixed(4);
-                    } catch {
-                      return fmt(v);
-                    }
-                  };
-
-                  const tapSum = get(minerData, 'tap_sum', 'tapSum', '_tapSum');
-                  const modifiedTapSum = get(minerData, 'modified_tap_sum', 'modifiedTapSum', '_modifiedTapSum');
-                  const tapSum5m = get(minerData, 'tap_sum_5m', 'tapSum5m', '_tapSum5m');
-                  const commitTaps = get(minerData, 'commit_taps', 'commitTaps', '_commitTaps');
-                  const miningDurSum = get(minerData, 'mining_dur_sum', 'miningDurSum', '_miningDurSum');
-                  const easyComplexity = get(minerData, 'easy_complexity', 'easyComplexity', '_easyComplexity');
-                  const hardComplexity = get(minerData, 'hard_complexity', 'hardComplexity', '_hardComplexity');
-                  const boost = get(minerData, 'boost', '_boost');
-                  const epochStart = get(minerData, 'epoch_start', 'epochStart', '_epochStart');
-                  // Look for any field that might contain pending reward
-                  const pendingReward = get(
-                    minerData,
-                    'pending_reward', 'pendingReward',
-                    'reward', 'accumulated_reward',
-                    'locked_nackl', 'lockedNackl',
-                    'nackl_locked', 'nacklLocked'
-                  );
-
-                  return (
-                    <>
-                      {pendingReward !== undefined && (
-                        <div className="miner-stat miner-stat--highlight">
-                          <div className="miner-stat__label">🔒 PENDING REWARD</div>
-                          <div className="miner-stat__value">{fmtNackl(pendingReward)}</div>
-                        </div>
-                      )}
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Tap sum</div>
-                        <div className="miner-stat__value">{fmt(tapSum)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Modified tap sum</div>
-                        <div className="miner-stat__value">{fmt(modifiedTapSum)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Tap sum 5m</div>
-                        <div className="miner-stat__value">{fmt(tapSum5m)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Commit taps</div>
-                        <div className="miner-stat__value">{fmt(commitTaps)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Mining dur sum</div>
-                        <div className="miner-stat__value">{fmt(miningDurSum)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Boost</div>
-                        <div className="miner-stat__value">{fmt(boost)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Easy complexity</div>
-                        <div className="miner-stat__value">{fmt(easyComplexity)}</div>
-                      </div>
-                      <div className="miner-stat">
-                        <div className="miner-stat__label">Hard complexity</div>
-                        <div className="miner-stat__value">{fmt(hardComplexity)}</div>
-                      </div>
-                      <div className="miner-stat miner-stat--wide">
-                        <div className="miner-stat__label">Epoch start</div>
-                        <div className="miner-stat__value">{fmt(epochStart)}</div>
-                      </div>
-                    </>
-                  );
-                })()}
-              </div>
-
-              <details className="miner-raw">
-                <summary>Raw JSON (for debugging)</summary>
-                <pre className="miner-raw__json">
-                  {JSON.stringify(
-                    minerData,
-                    (_, v) => (typeof v === 'bigint' ? v.toString() + 'n' : v),
-                    2
-                  )}
-                </pre>
-              </details>
-
-              {minerDataAt && (
-                <div className="miner-stats-ts">
-                  Last refresh: {new Date(minerDataAt).toLocaleTimeString()}
-                </div>
-              )}
-            </>
-          )}
-
-          <button
-            className="btn btn--full"
-            onClick={refreshMinerData}
-            disabled={minerDataLoading}
-            style={{ marginTop: 12 }}
-          >
-            {minerDataLoading ? '…' : '↻ Refresh miner stats'}
-          </button>
-        </div>
-      )}
 
       {/* ═══ LAST.FM CARD ═══ */}
       <div className="card">
@@ -1502,12 +646,6 @@ export default function App() {
             ℹ️ Rewards are collected automatically when session data is submitted on-chain.
             Check your wallet balance after a few completed sessions.
           </div>
-          <div className="mining-warning">
-            ⚠️ <strong>Keep the TMA in foreground during mining.</strong> On mobile, iOS/Android
-            throttle background timers, so if you lock the screen or switch app the tap loop
-            slows down or stops mid-session. We acquire a screen wake lock on Start, but
-            the OS can still release it in sleep mode.
-          </div>
         </div>
       )}
 
@@ -1571,16 +709,8 @@ export default function App() {
                     <code>{storedKeys.appId.substring(0, 10)}…{storedKeys.appId.substring(storedKeys.appId.length - 4)}</code>
                   </div>
                   <div className="debug-kv">
-                    <span>source</span>
-                    <code>{storedKeys.source}</code>
-                  </div>
-                  <div className="debug-kv">
                     <span>publicKey</span>
                     <code>{storedKeys.publicKey.substring(0, 16)}…</code>
-                  </div>
-                  <div className="debug-kv">
-                    <span>walletAddress</span>
-                    <code className="debug-addr">{storedKeys.walletAddress}</code>
                   </div>
                   <div className="debug-kv">
                     <span>minerAddress</span>
@@ -1588,38 +718,6 @@ export default function App() {
                   </div>
                 </div>
               </>
-            )}
-
-            {debugWalletInfo && (
-              <div className="debug-section">
-                <div className="debug-section__title">Wallet on-chain ({debugWalletInfo.network})</div>
-                <div className="debug-kv">
-                  <span>acc_type</span>
-                  <code>{debugWalletInfo.accType ?? 'null'}</code>
-                </div>
-                <div className="debug-kv">
-                  <span>VMSHELL (nano)</span>
-                  <code>{debugWalletInfo.balance}</code>
-                </div>
-                <div className="debug-kv">
-                  <span>balance_other</span>
-                  <code>{JSON.stringify(debugWalletInfo.balanceOther)}</code>
-                </div>
-                <div className="debug-kv">
-                  <span>dapp_id</span>
-                  <code className="debug-addr">{debugWalletInfo.dappId || '—'}</code>
-                </div>
-                <div className="debug-kv">
-                  <span>last_paid</span>
-                  <code>{debugWalletInfo.lastPaid || '—'}</code>
-                </div>
-                {debugWalletInfo.error && (
-                  <div className="debug-kv">
-                    <span>error</span>
-                    <code className="debug-error">{debugWalletInfo.error}</code>
-                  </div>
-                )}
-              </div>
             )}
 
             {debugMinerInfo && (
@@ -1651,81 +749,6 @@ export default function App() {
                     <code className="debug-error">{debugMinerInfo.error}</code>
                   </div>
                 )}
-              </div>
-            )}
-
-            <div className="debug-section">
-              <div className="debug-section__title">Linked contracts discovery</div>
-              <div className="debug-hint">
-                Scan all contracts this wallet has messaged. Useful to find
-                Mamaboard/game/indexer addresses. Does NOT show locked NACKL
-                (that's tracked manually in the wallet card).
-              </div>
-              <button
-                className="btn btn--full"
-                onClick={() =>
-                  refreshLinkedAccounts(
-                    storedKeys!.walletAddress || storedKeys!.minerAddress
-                  )
-                }
-                disabled={linkedLoading || !storedKeys}
-                style={{ marginTop: 8 }}
-              >
-                {linkedLoading
-                  ? '⏳ Scanning chain…'
-                  : linkedAccounts
-                    ? `🔄 Rescan (${linkedAccounts.length} found)`
-                    : '🔍 Discover linked accounts'}
-              </button>
-            </div>
-
-            {linkedAccounts && linkedAccounts.length > 0 && (
-              <div className="debug-section">
-                <div className="debug-section__title">
-                  Linked accounts ({linkedAccounts.length})
-                </div>
-                <div className="debug-hint">
-                  Contracts this wallet has sent messages to, sorted by NACKL balance.
-                  Most entries will show 0 NACKL because locked rewards are
-                  tracked as internal state variables, not ECC balances.
-                  The "msgs" column shows how often each contract was messaged.
-                </div>
-                {linkedAccounts.map((acc, i) => (
-                  <div key={acc.address} className="linked-entry">
-                    <div className="linked-entry__header">
-                      <span className="linked-entry__rank">#{i + 1}</span>
-                      <a
-                        className="linked-entry__addr"
-                        href={explorerAccountUrl(acc.address)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {acc.address.substring(0, 12)}…
-                        {acc.address.substring(acc.address.length - 8)} ↗
-                      </a>
-                    </div>
-                    <div className="linked-entry__grid">
-                      <div>
-                        <span className="linked-entry__k">NACKL</span>
-                        <span className="linked-entry__v linked-entry__v--highlight">
-                          {acc.nacklBalance.toFixed(2)}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="linked-entry__k">SHELL</span>
-                        <span className="linked-entry__v">{acc.shellBalance.toFixed(2)}</span>
-                      </div>
-                      <div>
-                        <span className="linked-entry__k">USDC</span>
-                        <span className="linked-entry__v">{acc.usdcBalance.toFixed(2)}</span>
-                      </div>
-                      <div>
-                        <span className="linked-entry__k">msgs</span>
-                        <span className="linked-entry__v">{acc.messageCount}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
               </div>
             )}
 
