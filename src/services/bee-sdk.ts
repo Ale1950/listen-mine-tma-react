@@ -38,7 +38,7 @@ export const APP_ID =
 
 // ═══ Endpoints ═══
 // Format matches the official miner-react example: bare domain, no protocol prefix.
-export const ENDPOINTS = ['mainnet.ackinacki.org'];
+export const ENDPOINTS = ['mainnet-cf.ackinacki.org'];
 
 // ═══ WASM path ═══
 // Uses Vite's BASE_URL so it always matches vite.config.ts `base`.
