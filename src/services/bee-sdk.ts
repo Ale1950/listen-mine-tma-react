@@ -31,10 +31,12 @@ import init, {
 } from '@teamgosh/bee-sdk';
 
 // ═══ APP_ID ═══
-// Placeholder value per official Bee Engine SDK docs (Step 1, Application Registration).
-// Will be replaced with our own Dapp ID once we deploy a root contract.
+// All-zeros placeholder used by the official miner-react example from gosh-sh/bee-engine.
+// 0x...0001 turned out to be Popits' real Dapp ID (conflict for wallets already authorized
+// on Popits), not a generic placeholder. This will be replaced with our own Dapp ID once
+// we deploy a root contract.
 export const APP_ID =
-  '0x0000000000000000000000000000000000000000000000000000000000000001';
+  '0x0000000000000000000000000000000000000000000000000000000000000000';
 
 // ═══ Endpoints ═══
 // Format matches the official miner-react example: bare domain, no protocol prefix.
