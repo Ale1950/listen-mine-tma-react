@@ -180,7 +180,7 @@ export default function App() {
 
     try {
       // Step 1 — generate mining keys for our APP_ID
-      const keys = await generateMiningKeys();
+      const keys = await generateMiningKeys(name);
       addLog(`Mining keys generated. Public: ${keys.publicKey.substring(0, 16)}…`);
 
       // Step 2 — resolve miner contract address from wallet name

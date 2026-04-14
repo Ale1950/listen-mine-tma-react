@@ -29,18 +29,20 @@ import init, {
   get_miner_address_by_wallet_name,
   Miner,
 } from '@teamgosh/bee-sdk';
+import { sha256 } from 'js-sha256';
 
 // ═══ APP_ID ═══
-// All-zeros placeholder used by the official miner-react example from gosh-sh/bee-engine.
-// 0x...0001 turned out to be Popits' real Dapp ID (conflict for wallets already authorized
-// on Popits), not a generic placeholder. This will be replaced with our own Dapp ID once
-// we deploy a root contract.
+// Canonical AN mainnet APP_ID used by Popit Game and all official TMAs
+// (Ludo, Batteries, Popits). Confirmed by Eugene (GOSH) as the value to use
+// until we deploy our own Dapp ID root contract. The all-zeros variant in the
+// miner-react skeleton example is not the production value.
 export const APP_ID =
-  '0x0000000000000000000000000000000000000000000000000000000000000000';
+  '0x0000000000000000000000000000000000000000000000000000000000000001';
 
 // ═══ Endpoints ═══
-// Format matches the official miner-react example: bare domain, no protocol prefix.
-export const ENDPOINTS = ['https://mainnet.ackinacki.org'];
+// Per Eugene (GOSH): use mainnet-cf as the Block Manager endpoint. mainnet1 has
+// broken CORS. mainnet.ackinacki.org works for REST calls but mainnet-cf covers both.
+export const ENDPOINTS = ['https://mainnet-cf.ackinacki.org'];
 
 // ═══ WASM path ═══
 // Uses Vite's BASE_URL so it always matches vite.config.ts `base`.
@@ -57,12 +59,90 @@ export async function initBeeSDK(): Promise<void> {
   wasmInitialized = true;
 }
 
-// ═══ Step 2 — Generate mining keys ═══
-export async function generateMiningKeys() {
+// ═══ Deep-link builder for AN Wallet ═══
+// The npm @teamgosh/bee-sdk@0.1.0 returns the OLD deep_link format
+// (/wallet/connect, unsigned). AN Wallet requires the NEW format
+// (/deeplinks/wallet/set-mining-keys, HMAC-SHA256 signed).
+// Per Eugene (GOSH), we keep the SDK's gen_mining_keys() for the key pair
+// and build the deep link by hand. Without a valid signature, AN Wallet
+// opens but silently rejects — no user-visible error.
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function utf8ToBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+async function hmacSha256Hex(secretBytes: Uint8Array, message: string): Promise<string> {
+  // Prefer Web Crypto (HTTPS / secure context). Fallback to js-sha256 otherwise.
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const key = await crypto.subtle.importKey(
+      'raw', secretBytes as BufferSource,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false, ['sign']
+    );
+    const sig = await crypto.subtle.sign(
+      'HMAC', key,
+      new TextEncoder().encode(message) as BufferSource
+    );
+    return bytesToHex(new Uint8Array(sig));
+  }
+  return sha256.hmac(secretBytes, message);
+}
+
+export async function buildSetMiningKeysDeepLink(
+  publicKey: string,
+  secretKey: string,
+  walletName: string
+): Promise<string> {
+  // 1. Inner payload
+  const inner = JSON.stringify({
+    app_id: APP_ID,
+    public: publicKey,
+    user_id: crypto.randomUUID(),
+    username: walletName,
+  });
+  const innerB64 = utf8ToBase64(inner);
+
+  // 2. HMAC-SHA256 over innerB64 using secret key bytes
+  const secretBytes = hexToBytes(secretKey);
+  const signature = await hmacSha256Hex(secretBytes, innerB64);
+
+  // 3. Outer envelope. expire_at is Unix timestamp in SECONDS (not ms).
+  const outer = JSON.stringify({
+    data: innerB64,
+    expire_at: Math.floor(Date.now() / 1000) + 3600,
+    signature,
+  });
+  const outerB64 = utf8ToBase64(outer);
+
+  return `https://links.gosh.sh/deeplinks/wallet/set-mining-keys?payload=${outerB64}`;
+}
+
+// ═══ Step 2 — Generate mining keys + signed deep link ═══
+export async function generateMiningKeys(walletName: string) {
   if (!wasmInitialized) await initBeeSDK();
   const result = await gen_mining_keys(APP_ID);
+  const deepLink = await buildSetMiningKeysDeepLink(
+    result.public,
+    result.secret,
+    walletName
+  );
   return {
-    deepLink: result.deep_link,
+    deepLink,
     publicKey: result.public,
     secretKey: result.secret,
   };
