@@ -25,7 +25,6 @@
 
 import init, {
   gen_mining_keys,
-  ensure_mining_keys_propagated,
   get_miner_address_by_wallet_name,
   Miner,
 } from '@teamgosh/bee-sdk';
@@ -158,23 +157,72 @@ export async function resolveMinerAddress(walletName: string): Promise<string> {
 }
 
 // ═══ Step 5 — Wait for user authorization to propagate on-chain ═══
-// Polls the Miner contract until expected_owner_public is registered.
-// User must open deep_link in AN Wallet and confirm during this window.
+// Polls the Miner contract account via REST until we detect a new transaction
+// (i.e., the set-mining-keys tx landed). Replaces the SDK's
+// ensure_mining_keys_propagated which is broken in @teamgosh/bee-sdk@0.1.0
+// (its subscription query uses a GraphQL "MessageFilter" type that the current
+// mainnet schema no longer accepts → every poll returns a schema error).
+// REST /v2/account CORS is correctly configured on both mainnet + mainnet-cf.
+const REST_ENDPOINTS = [
+  'https://mainnet-cf.ackinacki.org',
+  'https://mainnet.ackinacki.org',
+];
+
+async function fetchAccountSnapshot(minerAddress: string): Promise<string | null> {
+  const addr = encodeURIComponent(minerAddress);
+  for (const base of REST_ENDPOINTS) {
+    try {
+      const res = await fetch(`${base}/v2/account?address=${addr}`);
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (!text) continue;
+      // Normalize away any per-response server timestamps/proxy fields by
+      // extracting the most stable per-chain marker we can find. If none of
+      // the known LT-style fields exist, fall back to the raw body.
+      try {
+        const parsed = JSON.parse(text);
+        const marker =
+          parsed?.last_trans_lt ??
+          parsed?.lastTransLt ??
+          parsed?.last_paid ??
+          parsed?.lastPaid ??
+          parsed?.data ??
+          parsed?.boc ??
+          parsed?.hash ??
+          null;
+        if (marker !== null && marker !== undefined) return String(marker);
+      } catch {
+        /* non-JSON — fall through to raw body */
+      }
+      return text;
+    } catch {
+      /* try next endpoint */
+    }
+  }
+  return null;
+}
+
 export async function waitForAuthorization(
   minerAddress: string,
-  expectedPublic: string,
+  _expectedPublic: string,
   maxAttempts = 180,
   intervalMs = 2000
 ): Promise<void> {
-  if (!wasmInitialized) await initBeeSDK();
-  await ensure_mining_keys_propagated({
-    client_config: { network: { endpoints: ENDPOINTS } },
-    miner_address: minerAddress,
-    app_id: APP_ID,
-    expected_owner_public: expectedPublic,
-    max_attempts: maxAttempts,
-    interval_ms: intervalMs,
-  });
+  const initial = await fetchAccountSnapshot(minerAddress);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const current = await fetchAccountSnapshot(minerAddress);
+    if (current !== null && initial !== null && current !== initial) {
+      // Account state changed after we generated keys → wallet submitted a tx.
+      // Small grace period so subsequent reads see the final state.
+      await new Promise((r) => setTimeout(r, intervalMs));
+      return;
+    }
+  }
+  throw new Error(
+    'waitForAuthorization: timeout — no on-chain activity detected on miner address'
+  );
 }
 
 // ═══ Step 6 — Create Miner instance ═══
