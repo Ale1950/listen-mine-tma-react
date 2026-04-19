@@ -39,9 +39,12 @@ export const APP_ID =
   '0x0000000000000000000000000000000000000000000000000000000000000001';
 
 // ═══ Endpoints ═══
-// Per Eugene (GOSH): use mainnet-cf as the Block Manager endpoint. mainnet1 has
-// broken CORS. mainnet.ackinacki.org works for REST calls but mainnet-cf covers both.
-export const ENDPOINTS = ['https://mainnet-cf.ackinacki.org'];
+// Official miner-react example uses bare hostname ["mainnet.ackinacki.org"]
+// (no protocol, no -cf). The tvm_client inside the WASM adds the protocol
+// itself. With "https://mainnet-cf" the submit_session_root external message
+// send times out (ClientError code 623). REST calls used by
+// waitForAuthorization keep their own REST_ENDPOINTS below, protocol included.
+export const ENDPOINTS = ['mainnet.ackinacki.org'];
 
 // ═══ WASM path ═══
 // Uses Vite's BASE_URL so it always matches vite.config.ts `base`.
