@@ -55,9 +55,9 @@ export default function App() {
   const [currentTrack, setCurrentTrack] = useState<LastFmTrack | null>(null);
   const trackMonitorRef = useRef<TrackMonitor | null>(null);
 
-  // ═══ Mining auto-tap loop (fires every TAP_INTERVAL_MS while session active) ═══
+  // Mining auto-tap loop (fires every TAP_INTERVAL_MS while session active).
+  // No external session-end timer: the SDK finalizes at duration_ms on its own.
   const tapTimerRef = useRef<number | null>(null);
-  const sessionTimerRef = useRef<number | null>(null);
   const tapCoordsRef = useRef({ x: 200, y: 200 });
   const tapsCountRef = useRef(0);
 
@@ -255,8 +255,17 @@ export default function App() {
   function handleStartMining() {
     addLog('Starting mining session…');
     const ok = startMiningSession(SESSION_DURATION_MS, (event) => {
-      const action = event?.action || event;
-      addLog(`📡 ${action}`);
+      // Log whatever the SDK emits verbatim. We need to observe the shape
+      // of completion signals (if any) when the internal session timer
+      // expires. Previously an external setTimeout called miner.stop() at
+      // duration_ms, aborting submit_session_root before it could fire.
+      let payload: string;
+      if (typeof event === 'string') payload = event;
+      else {
+        try { payload = JSON.stringify(event); }
+        catch { payload = String(event); }
+      }
+      addLog(`📡 SDK event: ${payload}`);
     });
     if (!ok) {
       addLog('✗ Cannot start mining (miner not ready)');
@@ -293,24 +302,12 @@ export default function App() {
         addLog(`✗ Tap failed (${x},${y})`);
       }
     }, TAP_INTERVAL_MS);
-
-    // Auto-stop when session duration expires
-    sessionTimerRef.current = window.setTimeout(() => {
-      addLog('⏰ Session duration expired, auto-stopping');
-      handleStopMining();
-    }, SESSION_DURATION_MS);
   }
 
   function handleStopMining() {
-    // Clear tap timer
     if (tapTimerRef.current !== null) {
       window.clearInterval(tapTimerRef.current);
       tapTimerRef.current = null;
-    }
-    // Clear session auto-stop timer
-    if (sessionTimerRef.current !== null) {
-      window.clearTimeout(sessionTimerRef.current);
-      sessionTimerRef.current = null;
     }
     stopMining();
     setMiningActive(false);
