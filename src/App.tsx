@@ -22,6 +22,11 @@ import {
   APP_ID,
   type StoredMiningKeys,
 } from './services/bee-sdk';
+import {
+  discoverLinkedAccounts,
+  getLockedNackl,
+  guessMamaboard,
+} from './services/mamaboard';
 import { detectLang, isRTL, t, type Lang } from './services/i18n';
 
 type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 'error';
@@ -46,6 +51,41 @@ export default function App() {
   );
   const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
   const [walletLoading, setWalletLoading] = useState(false);
+
+  // ═══ NACKL Locked tracker ═══
+  // Mamaboard contract address holds the user's accumulated mining rewards.
+  // The miner contract does NOT hold NACKL itself — it only witnesses session
+  // submissions. The wallet address is needed to auto-discover the Mamaboard
+  // via outbound-message scan (it's not stored by the mining flow, which only
+  // persists walletName + minerAddress).
+  const LOCKED_WALLET_ADDR_KEY = 'lm_wallet_address_v1';
+  const LOCKED_MAMABOARD_KEY = 'lm_mamaboard_address_v1';
+  const LOCKED_SAMPLES_KEY = 'lm_locked_samples_v1';
+  interface LockedSample {
+    value: number;
+    timestamp: number;
+    note?: string;
+    source: 'auto' | 'manual';
+  }
+  const [walletAddressInput, setWalletAddressInput] = useState(
+    () => localStorage.getItem(LOCKED_WALLET_ADDR_KEY) || ''
+  );
+  const [mamaboardInput, setMamaboardInput] = useState(
+    () => localStorage.getItem(LOCKED_MAMABOARD_KEY) || ''
+  );
+  const [lockedSamples, setLockedSamples] = useState<LockedSample[]>(() => {
+    try {
+      const raw = localStorage.getItem(LOCKED_SAMPLES_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  });
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [lockedReadLoading, setLockedReadLoading] = useState(false);
+  const [newSampleValue, setNewSampleValue] = useState('');
+  const [newSampleNote, setNewSampleNote] = useState('');
+  const [showManualEntry, setShowManualEntry] = useState(false);
 
   // ═══ Last.fm ═══
   const [lastfmInput, setLastfmInput] = useState('');
@@ -398,6 +438,145 @@ export default function App() {
     }
   }
 
+  // ═══ NACKL Locked handlers ═══
+  function persistWalletAddress(v: string) {
+    setWalletAddressInput(v);
+    const trimmed = v.trim();
+    if (trimmed) localStorage.setItem(LOCKED_WALLET_ADDR_KEY, trimmed);
+    else localStorage.removeItem(LOCKED_WALLET_ADDR_KEY);
+  }
+
+  function persistMamaboard(v: string) {
+    setMamaboardInput(v);
+    const trimmed = v.trim();
+    if (trimmed) localStorage.setItem(LOCKED_MAMABOARD_KEY, trimmed);
+    else localStorage.removeItem(LOCKED_MAMABOARD_KEY);
+  }
+
+  function appendLockedSample(sample: LockedSample) {
+    setLockedSamples(prev => {
+      const next = [sample, ...prev].slice(0, 50);
+      localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function handleDeleteLockedSample(idx: number) {
+    setLockedSamples(prev => {
+      const next = prev.filter((_, i) => i !== idx);
+      localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  async function handleDiscoverMamaboard() {
+    const wallet = walletAddressInput.trim();
+    if (!wallet) { addLog('✗ Paste wallet address first'); return; }
+    setDiscoveryLoading(true);
+    addLog('🔍 Scanning outbound messages to discover Mamaboard…');
+    try {
+      const linked = await discoverLinkedAccounts(wallet);
+      const best = guessMamaboard(linked);
+      if (best) {
+        persistMamaboard(best.address);
+        addLog(`✓ Mamaboard candidate: ${best.address.substring(0, 12)}… (${best.nackl.toFixed(2)} NACKL, ${best.messageCount} msgs)`);
+      } else {
+        addLog(`✗ No NACKL-holding contract among ${linked.length} linked accounts — paste Mamaboard address manually`);
+      }
+    } catch (e: any) {
+      addLog(`✗ Discovery failed: ${e.message}`);
+    } finally {
+      setDiscoveryLoading(false);
+    }
+  }
+
+  // Reads Mamaboard locked NACKL and appends a sample if the value changed
+  // vs the latest stored sample. `silent=true` suppresses log lines for the
+  // automatic polling path.
+  async function readLockedNow(silent = false) {
+    const addr = mamaboardInput.trim();
+    if (!addr) {
+      if (!silent) addLog('✗ Set Mamaboard address first');
+      return;
+    }
+    setLockedReadLoading(true);
+    try {
+      const read = await getLockedNackl(addr);
+      setLockedSamples(prev => {
+        const latest = prev[0];
+        if (latest && latest.value === read.nackl) {
+          if (!silent) addLog(`· Locked NACKL unchanged: ${read.nackl.toFixed(4)}`);
+          return prev;
+        }
+        const autoSample: LockedSample = {
+          value: read.nackl,
+          timestamp: read.timestamp,
+          source: 'auto',
+        };
+        const next: LockedSample[] = [autoSample, ...prev].slice(0, 50);
+        localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
+        if (!silent) addLog(`✓ Locked NACKL: ${read.nackl.toFixed(4)} (${read.network})`);
+        return next;
+      });
+    } catch (e: any) {
+      if (!silent) addLog(`✗ Read locked failed: ${e.message}`);
+    } finally {
+      setLockedReadLoading(false);
+    }
+  }
+
+  function handleAddManualSample() {
+    const normalized = newSampleValue.replace(/\s/g, '').replace(',', '.');
+    const v = parseFloat(normalized);
+    if (isNaN(v) || v < 0) { addLog('✗ Invalid NACKL value'); return; }
+    appendLockedSample({
+      value: v,
+      timestamp: Date.now(),
+      note: newSampleNote.trim() || undefined,
+      source: 'manual',
+    });
+    setNewSampleValue('');
+    setNewSampleNote('');
+    addLog(`✓ Manual locked sample: ${v.toFixed(4)}`);
+  }
+
+  // Derived stats: delta + rate between newest and oldest sample.
+  // Null when we have <2 samples (rate would be meaningless).
+  const lockedStats = (() => {
+    if (lockedSamples.length < 2) return null;
+    const latest = lockedSamples[0];
+    const oldest = lockedSamples[lockedSamples.length - 1];
+    const delta = latest.value - oldest.value;
+    const elapsedMs = latest.timestamp - oldest.timestamp;
+    const hours = elapsedMs / 3_600_000;
+    const rate = hours > 0 ? delta / hours : 0;
+    return { latest, oldest, delta, elapsedMs, rateNacklPerHour: rate };
+  })();
+
+  function formatLockedDuration(ms: number): string {
+    if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+    if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+    const h = Math.floor(ms / 3_600_000);
+    const m = Math.floor((ms % 3_600_000) / 60_000);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+
+  // Auto-read locked NACKL every 60s while a mining session is active.
+  // On-demand ("Read now") button handles the idle case.
+  useEffect(() => {
+    if (!miningActive) return;
+    if (!mamaboardInput.trim()) return;
+    const id = window.setInterval(() => { readLockedNow(true); }, 60_000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [miningActive, mamaboardInput]);
+
+  // One-shot read on mount if we already have a Mamaboard address cached.
+  useEffect(() => {
+    if (mamaboardInput.trim()) readLockedNow(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function handleDisconnectWallet() {
     if (miningActive) handleStopMining();
     clearMiningKeys();
@@ -565,6 +744,153 @@ export default function App() {
           </>
         )}
       </div>
+
+      {/* ═══ NACKL LOCKED TRACKER CARD ═══ */}
+      {storedKeys && (
+        <div className="card">
+          <div className="card__label">🔒 {t(lang, 'lockedTitle')}</div>
+          <div className="locked-hint">{t(lang, 'lockedHint')}</div>
+
+          {/* Current value + delta + rate */}
+          {lockedStats ? (
+            <div className="locked-stats">
+              <div className="locked-stat">
+                <div className="locked-stat__label">{t(lang, 'latest')}</div>
+                <div className="locked-stat__value">
+                  {lockedStats.latest.value.toLocaleString('en-US', {
+                    minimumFractionDigits: 2, maximumFractionDigits: 2,
+                  })}
+                </div>
+                <div className="locked-stat__sub">
+                  {new Date(lockedStats.latest.timestamp).toLocaleTimeString()}
+                </div>
+              </div>
+              <div className="locked-stat">
+                <div className="locked-stat__label">{t(lang, 'delta')}</div>
+                <div className={`locked-stat__value ${lockedStats.delta >= 0 ? 'locked-stat__value--pos' : 'locked-stat__value--neg'}`}>
+                  {lockedStats.delta >= 0 ? '+' : ''}{lockedStats.delta.toFixed(4)}
+                </div>
+                <div className="locked-stat__sub">
+                  {formatLockedDuration(lockedStats.elapsedMs)}
+                </div>
+              </div>
+              <div className="locked-stat">
+                <div className="locked-stat__label">{t(lang, 'ratePerHour')}</div>
+                <div className="locked-stat__value">
+                  {lockedStats.rateNacklPerHour.toFixed(4)}
+                </div>
+                <div className="locked-stat__sub">·</div>
+              </div>
+            </div>
+          ) : lockedSamples.length === 1 ? (
+            <div className="locked-single">
+              {lockedSamples[0].value.toLocaleString('en-US', {
+                minimumFractionDigits: 2, maximumFractionDigits: 2,
+              })} NACKL · {new Date(lockedSamples[0].timestamp).toLocaleTimeString()}
+            </div>
+          ) : (
+            <div className="locked-empty">{t(lang, 'noSamples')}</div>
+          )}
+
+          {/* Wallet address + auto-discover */}
+          <div className="locked-field-label">{t(lang, 'walletAddressLabel')}</div>
+          <input
+            type="text"
+            className="input-field"
+            placeholder={t(lang, 'walletAddressPh')}
+            value={walletAddressInput}
+            onChange={e => persistWalletAddress(e.target.value)}
+            spellCheck={false}
+            style={{ marginBottom: 6 }}
+          />
+          <button
+            className="btn btn--full"
+            onClick={handleDiscoverMamaboard}
+            disabled={!walletAddressInput.trim() || discoveryLoading}
+            style={{ marginBottom: 10 }}
+          >
+            {discoveryLoading ? `⏳ ${t(lang, 'discovering')}` : `🔍 ${t(lang, 'autoDiscover')}`}
+          </button>
+
+          {/* Mamaboard address + read now */}
+          <div className="locked-field-label">{t(lang, 'mamaboardLabel')}</div>
+          <input
+            type="text"
+            className="input-field"
+            placeholder={t(lang, 'mamaboardPh')}
+            value={mamaboardInput}
+            onChange={e => persistMamaboard(e.target.value)}
+            spellCheck={false}
+            style={{ marginBottom: 6 }}
+          />
+          <button
+            className="btn btn--primary btn--full"
+            onClick={() => readLockedNow(false)}
+            disabled={!mamaboardInput.trim() || lockedReadLoading}
+          >
+            {lockedReadLoading ? `⏳ ${t(lang, 'reading')}` : `⚡ ${t(lang, 'readNow')}`}
+          </button>
+
+          {/* Manual fallback (collapsible) */}
+          <button
+            className="locked-manual-toggle"
+            onClick={() => setShowManualEntry(s => !s)}
+          >
+            {showManualEntry ? '▼' : '▶'} {t(lang, 'addManual')}
+          </button>
+          {showManualEntry && (
+            <div className="locked-manual-inputs">
+              <input
+                type="text"
+                className="input-field"
+                inputMode="decimal"
+                placeholder={t(lang, 'manualValuePh')}
+                value={newSampleValue}
+                onChange={e => setNewSampleValue(e.target.value)}
+              />
+              <input
+                type="text"
+                className="input-field"
+                placeholder={t(lang, 'manualNotePh')}
+                value={newSampleNote}
+                onChange={e => setNewSampleNote(e.target.value)}
+              />
+              <button
+                className="btn"
+                onClick={handleAddManualSample}
+                disabled={!newSampleValue.trim()}
+              >
+                {t(lang, 'add')}
+              </button>
+            </div>
+          )}
+
+          {/* Samples list */}
+          {lockedSamples.length > 0 && (
+            <div className="locked-samples-list">
+              {lockedSamples.slice(0, 10).map((s, i) => (
+                <div key={`${s.timestamp}-${i}`} className="locked-sample-row">
+                  <span className={`locked-sample-src locked-sample-src--${s.source}`}>
+                    {s.source}
+                  </span>
+                  <span className="locked-sample-value">{s.value.toFixed(4)}</span>
+                  <span className="locked-sample-ts">
+                    {new Date(s.timestamp).toLocaleString()}
+                    {s.note && ` — ${s.note}`}
+                  </span>
+                  <button
+                    className="locked-sample-del"
+                    onClick={() => handleDeleteLockedSample(i)}
+                    title="Delete"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ═══ LAST.FM CARD ═══ */}
       <div className="card">
