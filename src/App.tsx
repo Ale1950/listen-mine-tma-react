@@ -39,14 +39,14 @@ type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 
 // submit_session_root / session_accepted / finished events.
 const SESSION_DURATION_MS = 15_000;
 
-// Target ~70 taps per 15s session (Mining Hub's Ya = 70n on-chain threshold).
-// 15000 / 70 ≈ 214ms; rounded down to 200ms to stay above the target.
-const TAP_INTERVAL_MS = 200;
+// Listen & Mine is a music app, not a clicker. 8 taps in a 15s session is
+// plenty to witness the Merkle tree and pass the on-chain threshold.
+// 15000 / 8 = 1875ms.
+const TAP_INTERVAL_MS = 1_875;
 
-// After each session, loop back to canStart() + start() — up to 10× per epoch
-// (matches Mining Hub's xa = 10). After that, the epoch is full and further
-// sessions would be rejected anyway; we keep reward polling active.
-const MAX_SESSIONS_PER_EPOCH = 10;
+// Epoch loop runs forever while the user is mining. Counter is for display.
+// (Mining Hub's xa=10 cap is intentionally NOT applied here — the user wants
+// mining to continue as long as music is playing.)
 
 // Independent get_reward() polling cadence while mining is active (Mining Hub
 // X2 = 15_000). The SDK submits session data on its own, but an explicit
@@ -57,10 +57,12 @@ const REWARD_POLL_MS = 15_000;
 const BACKOFF_BASE_MS = 5_000;
 const BACKOFF_MAX_MS = 60_000;
 
-// Gap between sessions — poll can_start() until true, with an overall timeout
-// slightly longer than one session duration (mirrors Mining Hub's pd = 18_000).
+// Gap between sessions: poll can_start() every 1s for the first "quick" window,
+// then fall back to a slow 30s retry so we don't hammer the SDK while the
+// network settles. The loop never gives up — only handleStopMining() does.
 const CANSTART_POLL_MS = 1_000;
-const CANSTART_TIMEOUT_MS = 18_000;
+const CANSTART_SLOW_MS = 30_000;
+const CANSTART_QUICK_WINDOW_MS = 18_000;
 
 // Safety watchdog: if no progress event arrives within this window, force the
 // session loop to move on anyway. Session + 18s buffer.
@@ -419,19 +421,6 @@ export default function App() {
     clearWatchdog();
 
     if (!shouldAutoRestartRef.current) return;
-    if (sessionCountRef.current >= MAX_SESSIONS_PER_EPOCH) {
-      addLog(`🏁 Epoch full: ${sessionCountRef.current}/${MAX_SESSIONS_PER_EPOCH} sessions — stopping loop (reward poll continues for 60s)`);
-      // Keep reward poll running briefly so any pending rewards land.
-      window.setTimeout(() => {
-        if (!shouldAutoRestartRef.current) return;
-        shouldAutoRestartRef.current = false;
-        clearAllMiningTimers();
-        stopMining();
-        setMiningActive(false);
-      }, 60_000);
-      shouldAutoRestartRef.current = false;
-      return;
-    }
 
     if (!canStartMining()) {
       pollCanStartThenStart();
@@ -441,7 +430,7 @@ export default function App() {
     const genAtStart = ++sessionGenRef.current;
     sessionCountRef.current += 1;
     setSessionCount(sessionCountRef.current);
-    addLog(`▶ Session ${sessionCountRef.current}/${MAX_SESSIONS_PER_EPOCH}: start (${SESSION_DURATION_MS / 1000}s, tap every ${TAP_INTERVAL_MS}ms)…`);
+    addLog(`▶ Session ${sessionCountRef.current}: start (${SESSION_DURATION_MS / 1000}s, tap every ${(TAP_INTERVAL_MS / 1000).toFixed(2)}s → ~${Math.round(SESSION_DURATION_MS / TAP_INTERVAL_MS)} taps)…`);
 
     const ok = startMiningSession(SESSION_DURATION_MS, (event) => handleSdkEvent(event, genAtStart));
     if (!ok) {
@@ -467,20 +456,23 @@ export default function App() {
   function pollCanStartThenStart() {
     clearCanStartTimer();
     const startedAt = Date.now();
+    let slowLogged = false;
     const tick = () => {
       if (!shouldAutoRestartRef.current) return;
       if (canStartMining()) {
         startNextSession();
         return;
       }
-      if (Date.now() - startedAt > CANSTART_TIMEOUT_MS) {
-        addLog(`⏱ can_start()=false after ${CANSTART_TIMEOUT_MS / 1000}s — aborting epoch loop`);
-        shouldAutoRestartRef.current = false;
-        clearAllMiningTimers();
-        setMiningActive(false);
-        return;
+      const elapsed = Date.now() - startedAt;
+      // First 18s: fast poll every 1s. After that: slow poll every 30s.
+      // Never give up — only the Stop button ends the loop.
+      const isSlow = elapsed > CANSTART_QUICK_WINDOW_MS;
+      const nextMs = isSlow ? CANSTART_SLOW_MS : CANSTART_POLL_MS;
+      if (isSlow && !slowLogged) {
+        slowLogged = true;
+        addLog(`⏳ can_start()=false after ${Math.round(elapsed / 1000)}s — switching to slow retry every ${CANSTART_SLOW_MS / 1000}s (loop keeps running until Stop)`);
       }
-      canStartTimerRef.current = window.setTimeout(tick, CANSTART_POLL_MS);
+      canStartTimerRef.current = window.setTimeout(tick, nextMs);
     };
     tick();
   }
@@ -540,7 +532,7 @@ export default function App() {
 
   function handleStartMining() {
     if (miningActive) return;
-    addLog(`▶ Starting epoch: up to ${MAX_SESSIONS_PER_EPOCH} × ${SESSION_DURATION_MS / 1000}s sessions, tap every ${TAP_INTERVAL_MS}ms, reward poll every ${REWARD_POLL_MS / 1000}s`);
+    addLog(`▶ Mining started: ${SESSION_DURATION_MS / 1000}s sessions back-to-back (~${Math.round(SESSION_DURATION_MS / TAP_INTERVAL_MS)} taps each), reward poll every ${REWARD_POLL_MS / 1000}s. Runs until Stop.`);
     shouldAutoRestartRef.current = true;
     sessionCountRef.current = 0;
     rejectionCountRef.current = 0;
@@ -1154,7 +1146,7 @@ export default function App() {
             </span>
             {miningActive && (
               <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-                Session <strong>{sessionCount}/{MAX_SESSIONS_PER_EPOCH}</strong> · {t(lang, 'sessionTaps')}: <strong>{tapsCount}</strong>
+                Session <strong>#{sessionCount}</strong> · {t(lang, 'sessionTaps')}: <strong>{tapsCount}</strong>
               </span>
             )}
           </div>
