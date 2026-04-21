@@ -16,6 +16,8 @@ import {
   startMiningSession,
   stopMining,
   addTap,
+  canStartMining,
+  claimReward,
   saveMiningKeys,
   loadMiningKeys,
   clearMiningKeys,
@@ -31,15 +33,38 @@ import { detectLang, isRTL, t, type Lang } from './services/i18n';
 
 type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 'error';
 
-// Session duration passed to Miner.start(duration_ms, callback).
-// Tuned for a ~5 min mining window; the SDK auto-stops at expiry and submits
-// session results to the Miner contract internally.
-const SESSION_DURATION_MS = 330_000;
+// ═══ Mining flow constants (aligned with Mining Hub 1.2.2) ═══
+// Each Miner.start(duration_ms, cb) call is a short 15s micro-session.
+// The SDK's internal timer finalises the session at duration_ms and emits
+// submit_session_root / session_accepted / finished events.
+const SESSION_DURATION_MS = 15_000;
 
-// Auto-tap cadence: one Miner.add_tap(x,y) every TAP_INTERVAL_MS while the
-// session is active. Tap count of ~70 per session keeps the Merkle tree dense
-// without hammering the WASM module.
-const TAP_INTERVAL_MS = 4710;
+// Target ~70 taps per 15s session (Mining Hub's Ya = 70n on-chain threshold).
+// 15000 / 70 ≈ 214ms; rounded down to 200ms to stay above the target.
+const TAP_INTERVAL_MS = 200;
+
+// After each session, loop back to canStart() + start() — up to 10× per epoch
+// (matches Mining Hub's xa = 10). After that, the epoch is full and further
+// sessions would be rejected anyway; we keep reward polling active.
+const MAX_SESSIONS_PER_EPOCH = 10;
+
+// Independent get_reward() polling cadence while mining is active (Mining Hub
+// X2 = 15_000). The SDK submits session data on its own, but an explicit
+// get_reward() is what actually transfers NACKL to the miner contract.
+const REWARD_POLL_MS = 15_000;
+
+// Exponential backoff on submit_session_root errors: 5s, 10s, 20s, 40s, cap 60s.
+const BACKOFF_BASE_MS = 5_000;
+const BACKOFF_MAX_MS = 60_000;
+
+// Gap between sessions — poll can_start() until true, with an overall timeout
+// slightly longer than one session duration (mirrors Mining Hub's pd = 18_000).
+const CANSTART_POLL_MS = 1_000;
+const CANSTART_TIMEOUT_MS = 18_000;
+
+// Safety watchdog: if no progress event arrives within this window, force the
+// session loop to move on anyway. Session + 18s buffer.
+const SESSION_WATCHDOG_MS = SESSION_DURATION_MS + 18_000;
 
 export default function App() {
   // ═══ Language ═══
@@ -101,6 +126,21 @@ export default function App() {
   const tapCoordsRef = useRef({ x: 200, y: 200 });
   const tapsCountRef = useRef(0);
 
+  // ═══ Session-loop orchestration (aligned with Mining Hub 1.2.2) ═══
+  // Each Start button press begins an "epoch" of up to MAX_SESSIONS_PER_EPOCH
+  // sequential 15s sessions. Between sessions we poll canStart() until true,
+  // then call startMiningSession() again. get_reward() polls independently
+  // every REWARD_POLL_MS while mining is active.
+  const shouldAutoRestartRef = useRef(false);
+  const sessionCountRef = useRef(0);
+  const rejectionCountRef = useRef(0);
+  const rewardPollRef = useRef<number | null>(null);
+  const canStartTimerRef = useRef<number | null>(null);
+  const watchdogRef = useRef<number | null>(null);
+  // Bumps on every session (re)start; watchdog/event handlers check their
+  // captured generation against this to ignore stale callbacks.
+  const sessionGenRef = useRef(0);
+
   // ═══ Mining auth ═══
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [authError, setAuthError] = useState('');
@@ -117,6 +157,7 @@ export default function App() {
   // ═══ Mining session ═══
   const [miningActive, setMiningActive] = useState(false);
   const [tapsCount, setTapsCount] = useState(0);
+  const [sessionCount, setSessionCount] = useState(0);
   const [sessionStart, setSessionStart] = useState<number | null>(null);
 
   // ═══ Logs ═══
@@ -292,66 +333,230 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleStartMining() {
-    addLog('Starting mining session…');
-    const ok = startMiningSession(SESSION_DURATION_MS, (event) => {
-      // Log whatever the SDK emits verbatim. We need to observe the shape
-      // of completion signals (if any) when the internal session timer
-      // expires. Previously an external setTimeout called miner.stop() at
-      // duration_ms, aborting submit_session_root before it could fire.
-      let payload: string;
-      if (typeof event === 'string') payload = event;
-      else {
-        try { payload = JSON.stringify(event); }
-        catch { payload = String(event); }
-      }
-      addLog(`📡 SDK event: ${payload}`);
-    });
-    if (!ok) {
-      addLog('✗ Cannot start mining (miner not ready)');
-      return;
-    }
-    setMiningActive(true);
-    setSessionStart(Date.now());
-    setTapsCount(0);
-    tapsCountRef.current = 0;
-    addLog(`✓ Session started (${SESSION_DURATION_MS / 1000}s, tap every ${TAP_INTERVAL_MS / 1000}s)`);
+  // ═══ Session-loop helpers ═══
 
-    // Reset coordinate drift starting point
+  function stopTapLoop() {
+    if (tapTimerRef.current !== null) {
+      window.clearInterval(tapTimerRef.current);
+      tapTimerRef.current = null;
+    }
+  }
+
+  function startTapLoop() {
+    stopTapLoop();
     tapCoordsRef.current = {
       x: 100 + Math.floor(Math.random() * 200),
       y: 100 + Math.floor(Math.random() * 300),
     };
+    tapsCountRef.current = 0;
+    setTapsCount(0);
 
-    // Start auto-tap loop — one Miner.add_tap(x,y) every TAP_INTERVAL_MS.
-    // Coordinates are app-defined (per Bee Engine docs); a random-walk drift
-    // keeps them varied across the session.
     tapTimerRef.current = window.setInterval(() => {
       const c = tapCoordsRef.current;
       c.x = Math.max(20, Math.min(280, c.x + (Math.random() - 0.5) * 30));
       c.y = Math.max(20, Math.min(380, c.y + (Math.random() - 0.5) * 30));
       const x = Math.floor(c.x);
       const y = Math.floor(c.y);
-
       if (addTap(x, y)) {
         tapsCountRef.current += 1;
-        const n = tapsCountRef.current;
-        setTapsCount(n);
-        addLog(`👆 Tap #${n} (${x},${y})`);
-      } else {
-        addLog(`✗ Tap failed (${x},${y})`);
+        setTapsCount(tapsCountRef.current);
       }
     }, TAP_INTERVAL_MS);
   }
 
-  function handleStopMining() {
-    if (tapTimerRef.current !== null) {
-      window.clearInterval(tapTimerRef.current);
-      tapTimerRef.current = null;
+  function clearWatchdog() {
+    if (watchdogRef.current !== null) {
+      window.clearTimeout(watchdogRef.current);
+      watchdogRef.current = null;
     }
+  }
+
+  function clearCanStartTimer() {
+    if (canStartTimerRef.current !== null) {
+      window.clearTimeout(canStartTimerRef.current);
+      canStartTimerRef.current = null;
+    }
+  }
+
+  function stopRewardPoll() {
+    if (rewardPollRef.current !== null) {
+      window.clearInterval(rewardPollRef.current);
+      rewardPollRef.current = null;
+    }
+  }
+
+  function startRewardPoll() {
+    stopRewardPoll();
+    rewardPollRef.current = window.setInterval(() => {
+      claimReward()
+        .then((ok) => { if (ok) addLog('💰 get_reward() tick'); })
+        .catch((e) => addLog(`✗ get_reward: ${e?.message ?? e}`));
+    }, REWARD_POLL_MS);
+  }
+
+  function clearAllMiningTimers() {
+    stopTapLoop();
+    clearWatchdog();
+    clearCanStartTimer();
+    stopRewardPoll();
+  }
+
+  // Parse SDK event: shape varies across Bee SDK versions. Pull kind/data/error
+  // from whatever path is present.
+  function parseSdkEvent(event: any): { kind: string; data: any; error?: string } {
+    if (typeof event === 'string') return { kind: event, data: null };
+    const e = event ?? {};
+    const kind = (e.action ?? e.type ?? e.event ?? 'unknown') as string;
+    const data = e.data ?? e.payload ?? null;
+    let error: string | undefined;
+    if (typeof e.error === 'string') error = e.error;
+    else if (data && typeof data === 'object' && typeof data.error === 'string') error = data.error;
+    return { kind, data, error };
+  }
+
+  function startNextSession() {
+    stopTapLoop();
+    clearWatchdog();
+
+    if (!shouldAutoRestartRef.current) return;
+    if (sessionCountRef.current >= MAX_SESSIONS_PER_EPOCH) {
+      addLog(`🏁 Epoch full: ${sessionCountRef.current}/${MAX_SESSIONS_PER_EPOCH} sessions — stopping loop (reward poll continues for 60s)`);
+      // Keep reward poll running briefly so any pending rewards land.
+      window.setTimeout(() => {
+        if (!shouldAutoRestartRef.current) return;
+        shouldAutoRestartRef.current = false;
+        clearAllMiningTimers();
+        stopMining();
+        setMiningActive(false);
+      }, 60_000);
+      shouldAutoRestartRef.current = false;
+      return;
+    }
+
+    if (!canStartMining()) {
+      pollCanStartThenStart();
+      return;
+    }
+
+    const genAtStart = ++sessionGenRef.current;
+    sessionCountRef.current += 1;
+    setSessionCount(sessionCountRef.current);
+    addLog(`▶ Session ${sessionCountRef.current}/${MAX_SESSIONS_PER_EPOCH}: start (${SESSION_DURATION_MS / 1000}s, tap every ${TAP_INTERVAL_MS}ms)…`);
+
+    const ok = startMiningSession(SESSION_DURATION_MS, (event) => handleSdkEvent(event, genAtStart));
+    if (!ok) {
+      addLog('✗ startMiningSession returned false — retrying after short delay');
+      sessionCountRef.current -= 1;
+      setSessionCount(sessionCountRef.current);
+      scheduleNextSession(BACKOFF_BASE_MS);
+      return;
+    }
+
+    setSessionStart(Date.now());
+    startTapLoop();
+
+    // Safety watchdog — ignored if generation already advanced.
+    watchdogRef.current = window.setTimeout(() => {
+      if (sessionGenRef.current !== genAtStart) return;
+      addLog(`⏱ Session ${sessionCountRef.current}: no SDK event within ${SESSION_WATCHDOG_MS / 1000}s — forcing next`);
+      stopTapLoop();
+      scheduleNextSession();
+    }, SESSION_WATCHDOG_MS);
+  }
+
+  function pollCanStartThenStart() {
+    clearCanStartTimer();
+    const startedAt = Date.now();
+    const tick = () => {
+      if (!shouldAutoRestartRef.current) return;
+      if (canStartMining()) {
+        startNextSession();
+        return;
+      }
+      if (Date.now() - startedAt > CANSTART_TIMEOUT_MS) {
+        addLog(`⏱ can_start()=false after ${CANSTART_TIMEOUT_MS / 1000}s — aborting epoch loop`);
+        shouldAutoRestartRef.current = false;
+        clearAllMiningTimers();
+        setMiningActive(false);
+        return;
+      }
+      canStartTimerRef.current = window.setTimeout(tick, CANSTART_POLL_MS);
+    };
+    tick();
+  }
+
+  function scheduleNextSession(delayMs = 0) {
+    if (!shouldAutoRestartRef.current) return;
+    stopTapLoop();
+    clearWatchdog();
+    clearCanStartTimer();
+    if (delayMs > 0) {
+      addLog(`⏳ Backoff ${(delayMs / 1000).toFixed(0)}s before next session attempt…`);
+      canStartTimerRef.current = window.setTimeout(pollCanStartThenStart, delayMs);
+    } else {
+      pollCanStartThenStart();
+    }
+  }
+
+  function handleSdkEvent(event: any, gen: number) {
+    // Ignore stale events (from a session that's already been replaced).
+    if (gen !== sessionGenRef.current) return;
+
+    const { kind, data, error } = parseSdkEvent(event);
+    addLog(`📡 SDK: ${kind}${error ? ` ERROR="${error}"` : ''}`);
+
+    if (kind === 'submit_session_root') {
+      if (error) {
+        rejectionCountRef.current += 1;
+        const n = rejectionCountRef.current;
+        const backoff = Math.min(BACKOFF_BASE_MS * Math.pow(2, n - 1), BACKOFF_MAX_MS);
+        addLog(`⚠️ submit_session_root FAILED (#${n}): backoff ${(backoff / 1000).toFixed(0)}s`);
+        scheduleNextSession(backoff);
+      }
+      // success: wait for session_accepted / finished
+      return;
+    }
+
+    if (kind === 'session_accepted') {
+      rejectionCountRef.current = 0;
+      addLog('✓ session_accepted by network');
+      return;
+    }
+
+    if (kind === 'status_updated') {
+      const status = (data && typeof data === 'object' ? data.status : '') as string;
+      if (status === 'finished' || status === 'removed') {
+        addLog(`🔚 Session ${sessionCountRef.current} ended (${status})`);
+        scheduleNextSession();
+      }
+      return;
+    }
+
+    if (kind === 'finished' || kind === 'removed') {
+      addLog(`🔚 Session ${sessionCountRef.current} ended (${kind})`);
+      scheduleNextSession();
+    }
+  }
+
+  function handleStartMining() {
+    if (miningActive) return;
+    addLog(`▶ Starting epoch: up to ${MAX_SESSIONS_PER_EPOCH} × ${SESSION_DURATION_MS / 1000}s sessions, tap every ${TAP_INTERVAL_MS}ms, reward poll every ${REWARD_POLL_MS / 1000}s`);
+    shouldAutoRestartRef.current = true;
+    sessionCountRef.current = 0;
+    rejectionCountRef.current = 0;
+    setSessionCount(0);
+    setMiningActive(true);
+    setSessionStart(Date.now());
+    startRewardPoll();
+    startNextSession();
+  }
+
+  function handleStopMining() {
+    shouldAutoRestartRef.current = false;
+    clearAllMiningTimers();
     stopMining();
     setMiningActive(false);
-    addLog(`Session stopped. Total taps: ${tapsCountRef.current}`);
+    addLog(`⏹ Stopped. Sessions completed: ${sessionCountRef.current}, taps in last session: ${tapsCountRef.current}`);
   }
 
   // ═══ Debug runner — fetches on-chain state for the miner contract ═══
@@ -949,7 +1154,7 @@ export default function App() {
             </span>
             {miningActive && (
               <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-                {t(lang, 'sessionTaps')}: <strong>{tapsCount}</strong>
+                Session <strong>{sessionCount}/{MAX_SESSIONS_PER_EPOCH}</strong> · {t(lang, 'sessionTaps')}: <strong>{tapsCount}</strong>
               </span>
             )}
           </div>

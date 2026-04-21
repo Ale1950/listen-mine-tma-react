@@ -30,6 +30,147 @@ import init, {
 } from '@teamgosh/bee-sdk';
 import { sha256 } from 'js-sha256';
 
+// ═══ Resilient WebSocket wrapper ═══
+// Replaces globalThis.WebSocket so any WebSocket opened by the Bee SDK (GQL
+// subscriptions, session coordination) auto-reconnects on drops. Mirrors the
+// pattern in Mining Hub 1.2.2: without it, a transient network hiccup during
+// a session kills submit_session_root and the taps are lost.
+let wsPatched = false;
+
+function installResilientWs() {
+  if (wsPatched) return;
+  if (typeof globalThis === 'undefined' || typeof globalThis.WebSocket === 'undefined') return;
+  const Native = globalThis.WebSocket;
+  const RECONNECT_BASE = 1_000;
+  const RECONNECT_MAX = 15_000;
+  const MAX_RETRIES = 10;
+
+  class ResilientWS extends EventTarget {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    _url: string;
+    _protocols?: string | string[];
+    _ws: WebSocket | null = null;
+    _sendQueue: Array<string | ArrayBufferLike | Blob | ArrayBufferView> = [];
+    _retries = 0;
+    _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    _closedByUser = false;
+
+    onopen: ((ev: Event) => void) | null = null;
+    onmessage: ((ev: MessageEvent) => void) | null = null;
+    onclose: ((ev: CloseEvent) => void) | null = null;
+    onerror: ((ev: Event) => void) | null = null;
+
+    binaryType: BinaryType = 'blob';
+
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super();
+      this._url = typeof url === 'string' ? url : url.toString();
+      this._protocols = protocols;
+      this._connect();
+    }
+
+    get readyState(): number {
+      return this._ws ? this._ws.readyState : ResilientWS.CONNECTING;
+    }
+    get url(): string { return this._url; }
+    get protocol(): string { return this._ws?.protocol ?? ''; }
+    get bufferedAmount(): number { return this._ws?.bufferedAmount ?? 0; }
+    get extensions(): string { return this._ws?.extensions ?? ''; }
+
+    _dispatch(type: string, ev: Event) {
+      // Forward to .on* handler
+      const on = (this as any)[`on${type}`];
+      if (typeof on === 'function') {
+        try { on.call(this, ev); } catch (e) { console.error('[ResilientWS] handler error:', e); }
+      }
+      // Forward to addEventListener() listeners
+      try { this.dispatchEvent(ev); } catch {}
+    }
+
+    _connect() {
+      try {
+        this._ws = new Native(this._url, this._protocols as any);
+        this._ws.binaryType = this.binaryType;
+      } catch (e) {
+        console.warn('[ResilientWS] construct failed:', e);
+        this._scheduleReconnect();
+        return;
+      }
+
+      this._ws.addEventListener('open', (ev) => {
+        this._retries = 0;
+        // Flush queued sends
+        const q = this._sendQueue.splice(0);
+        for (const m of q) {
+          try { this._ws!.send(m); } catch (e) { console.warn('[ResilientWS] flush send failed:', e); }
+        }
+        this._dispatch('open', new Event('open'));
+        void ev;
+      });
+
+      this._ws.addEventListener('message', (ev) => {
+        const me = new MessageEvent('message', {
+          data: ev.data,
+          origin: ev.origin,
+          lastEventId: ev.lastEventId,
+        });
+        this._dispatch('message', me);
+      });
+
+      this._ws.addEventListener('error', () => {
+        this._dispatch('error', new Event('error'));
+      });
+
+      this._ws.addEventListener('close', (ev) => {
+        if (this._closedByUser || ev.code === 1000 || this._retries >= MAX_RETRIES) {
+          const ce = new CloseEvent('close', {
+            code: ev.code, reason: ev.reason, wasClean: ev.wasClean,
+          });
+          this._dispatch('close', ce);
+          return;
+        }
+        this._scheduleReconnect();
+      });
+    }
+
+    _scheduleReconnect() {
+      if (this._reconnectTimer !== null) return;
+      this._retries++;
+      const delay = Math.min(RECONNECT_BASE * Math.pow(2, this._retries - 1), RECONNECT_MAX);
+      console.log(`[ResilientWS] reconnect #${this._retries} in ${delay}ms → ${this._url}`);
+      this._reconnectTimer = setTimeout(() => {
+        this._reconnectTimer = null;
+        this._connect();
+      }, delay);
+    }
+
+    send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+      if (this._ws && this._ws.readyState === ResilientWS.OPEN) {
+        this._ws.send(data);
+      } else {
+        this._sendQueue.push(data);
+      }
+    }
+
+    close(code?: number, reason?: string) {
+      this._closedByUser = true;
+      if (this._reconnectTimer !== null) {
+        clearTimeout(this._reconnectTimer);
+        this._reconnectTimer = null;
+      }
+      try { this._ws?.close(code, reason); } catch {}
+    }
+  }
+
+  (globalThis as any).WebSocket = ResilientWS;
+  wsPatched = true;
+  console.log('[ResilientWS] installed — WebSocket replaced with auto-reconnect wrapper');
+}
+
 // ═══ APP_ID ═══
 // Canonical AN mainnet APP_ID used by Popit Game and all official TMAs
 // (Ludo, Batteries, Popits). Confirmed by Eugene (GOSH) as the value to use
@@ -56,6 +197,8 @@ let currentMiner: Miner | null = null;
 // ═══ Initialize WASM (call once) ═══
 export async function initBeeSDK(): Promise<void> {
   if (wasmInitialized) return;
+  // Patch WebSocket before SDK spins up any internal connections.
+  installResilientWs();
   await init({ module_or_path: WASM_PATH });
   wasmInitialized = true;
 }
