@@ -392,6 +392,32 @@ export function getCurrentMiner(): Miner | null {
   return currentMiner;
 }
 
+// ═══ Reinitialize the Miner instance (mirrors Mining Hub's BeeEngine.reinit) ═══
+// Destroys the current miner (frees WASM-allocated memory) and creates a new
+// one with the same credentials. Mining Hub calls this when can_start()
+// persistently returns false — the SDK keeps IDB-stale state across sessions
+// that only a fresh Miner.new() clears. Returns true on success.
+export async function reinitMiner(
+  minerAddress: string,
+  publicKey: string,
+  secretKey: string
+): Promise<boolean> {
+  if (!wasmInitialized) {
+    try { await initBeeSDK(); } catch { return false; }
+  }
+  if (currentMiner) {
+    try { currentMiner.free(); } catch {}
+    currentMiner = null;
+  }
+  try {
+    currentMiner = await Miner.new(ENDPOINTS, APP_ID, minerAddress, publicKey, secretKey);
+    return true;
+  } catch (e) {
+    console.error('[bee-sdk] reinitMiner failed:', e);
+    return false;
+  }
+}
+
 // ═══ Step 7 — Mining session control (Bee Engine Miner API) ═══
 export function canStartMining(): boolean {
   if (!currentMiner) return false;

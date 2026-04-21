@@ -18,6 +18,7 @@ import {
   addTap,
   canStartMining,
   claimReward,
+  reinitMiner,
   saveMiningKeys,
   loadMiningKeys,
   clearMiningKeys,
@@ -63,6 +64,11 @@ const BACKOFF_MAX_MS = 60_000;
 const CANSTART_POLL_MS = 1_000;
 const CANSTART_SLOW_MS = 30_000;
 const CANSTART_QUICK_WINDOW_MS = 18_000;
+
+// While stuck on can_start()=false, call reinitMiner() at this cadence. Mining
+// Hub does this when its SDK session is "stale": the miner's internal state is
+// reset by destroying + recreating the Miner instance with the same keys.
+const REINIT_INTERVAL_MS = 60_000;
 
 // Safety watchdog: if no progress event arrives within this window, force the
 // session loop to move on anyway. Session + 18s buffer.
@@ -453,28 +459,72 @@ export default function App() {
     }, SESSION_WATCHDOG_MS);
   }
 
+  async function attemptReinit(): Promise<boolean> {
+    if (!storedKeys) return false;
+    addLog('🔄 Reinit Miner (destroy + Miner.new with same keys)…');
+    try {
+      const ok = await reinitMiner(
+        storedKeys.minerAddress,
+        storedKeys.publicKey,
+        storedKeys.secretKey,
+      );
+      if (ok) {
+        addLog('✓ Miner reinit OK');
+        rejectionCountRef.current = 0;
+      } else {
+        addLog('✗ Miner reinit returned false');
+      }
+      return ok;
+    } catch (e: any) {
+      addLog(`✗ Miner reinit error: ${e?.message ?? e}`);
+      return false;
+    }
+  }
+
   function pollCanStartThenStart() {
     clearCanStartTimer();
     const startedAt = Date.now();
+    let lastReinitAt = 0;
     let slowLogged = false;
-    const tick = () => {
+
+    const tick = async () => {
       if (!shouldAutoRestartRef.current) return;
       if (canStartMining()) {
         startNextSession();
         return;
       }
       const elapsed = Date.now() - startedAt;
-      // First 18s: fast poll every 1s. After that: slow poll every 30s.
-      // Never give up — only the Stop button ends the loop.
       const isSlow = elapsed > CANSTART_QUICK_WINDOW_MS;
-      const nextMs = isSlow ? CANSTART_SLOW_MS : CANSTART_POLL_MS;
+
+      // Trigger Miner reinit after the 18s quick window expires, then every
+      // REINIT_INTERVAL_MS while stuck. Mirrors Mining Hub 1.2.2 handling of
+      // "stale SDK session" — a fresh Miner.new() clears internal state that
+      // keeps can_start() returning false across sessions.
+      const shouldReinit =
+        isSlow && (lastReinitAt === 0 || Date.now() - lastReinitAt >= REINIT_INTERVAL_MS);
+
+      if (shouldReinit) {
+        lastReinitAt = Date.now();
+        const ok = await attemptReinit();
+        if (!shouldAutoRestartRef.current) return;
+        if (ok && canStartMining()) {
+          startNextSession();
+          return;
+        }
+      }
+
       if (isSlow && !slowLogged) {
         slowLogged = true;
-        addLog(`⏳ can_start()=false after ${Math.round(elapsed / 1000)}s — switching to slow retry every ${CANSTART_SLOW_MS / 1000}s (loop keeps running until Stop)`);
+        addLog(`⏳ canStart()=false after ${Math.round(elapsed / 1000)}s — slow retry every ${CANSTART_SLOW_MS / 1000}s, reinit every ${REINIT_INTERVAL_MS / 1000}s (loop runs until Stop)`);
       }
-      canStartTimerRef.current = window.setTimeout(tick, nextMs);
+
+      const nextMs = isSlow ? CANSTART_SLOW_MS : CANSTART_POLL_MS;
+      canStartTimerRef.current = window.setTimeout(() => {
+        tick().catch((e) => addLog(`✗ poll tick error: ${e?.message ?? e}`));
+      }, nextMs);
     };
-    tick();
+
+    tick().catch((e) => addLog(`✗ poll tick error: ${e?.message ?? e}`));
   }
 
   function scheduleNextSession(delayMs = 0) {
