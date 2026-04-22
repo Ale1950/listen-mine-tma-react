@@ -23,12 +23,116 @@
  * It is not supported here.
  */
 
-import init, {
-  gen_mining_keys,
-  get_miner_address_by_wallet_name,
-  Miner,
-} from '@teamgosh/bee-sdk';
 import { sha256 } from 'js-sha256';
+
+// ═══ Bee SDK runtime types (loaded dynamically — no npm dep) ═══
+// We host the SDK ourselves under public/bee-sdk/ to use a NEWER WASM build
+// (9.24 MB, 2026-04-07) than the broken @teamgosh/bee-sdk@0.1.0 (7.74 MB) on
+// npm. Mirrors the file Eugene ships at https://mininghub.ackinacki.com/bee-sdk/.
+// Fetch + new Function() because the SDK uses ES module syntax that we need
+// to evaluate inline (so we can rewrite import.meta.url before execution).
+type Miner = {
+  can_start(): boolean;
+  start(durationMs: number, callback: (event: any) => void): void;
+  add_tap(x: number, y: number): void;
+  stop(): void;
+  get_reward(): Promise<void>;
+  get_miner_data(): Promise<any>;
+  free(): void;
+};
+type GenMiningKeysResult = {
+  public?: string;
+  public_key?: string;
+  publicKey?: string;
+  secret?: string;
+  secret_key?: string;
+  secretKey?: string;
+};
+interface BeeSdkNamespace {
+  default: (wasmPath: string) => Promise<unknown>;
+  Miner: {
+    new: (
+      endpoints: string[],
+      appId: string,
+      minerAddress: string,
+      publicKey: string,
+      secretKey: string,
+    ) => Promise<Miner>;
+  };
+  gen_mining_keys: (appId: string) => Promise<GenMiningKeysResult>;
+  get_miner_address_by_wallet_name: (args: {
+    client_config: any;
+    wallet_name: string;
+  }) => Promise<string>;
+  ensure_mining_keys_propagated?: (args: any) => Promise<unknown>;
+}
+
+let beeSdkNs: BeeSdkNamespace | null = null;
+let beeSdkLoading: Promise<BeeSdkNamespace> | null = null;
+
+function getBeeSdk(): BeeSdkNamespace {
+  if (!beeSdkNs) throw new Error('Bee SDK not initialised. Call initBeeSDK() first.');
+  return beeSdkNs;
+}
+
+// Mirrors Mining Hub 1.2.2's loader (their `hr()` function): fetch the SDK JS
+// as text, strip the ES `export` keywords, append a `return` block exposing
+// the symbols we need, then evaluate via `new Function()`.
+async function loadBeeSdkNamespace(): Promise<BeeSdkNamespace> {
+  if (beeSdkNs) return beeSdkNs;
+  if (beeSdkLoading) return beeSdkLoading;
+
+  beeSdkLoading = (async () => {
+    const baseUrl = import.meta.env.BASE_URL;
+    const jsUrl = new URL(`${baseUrl}bee-sdk/bee_sdk.js`, window.location.origin).href;
+    const wasmUrl = new URL(`${baseUrl}bee-sdk/bee_sdk_bg.wasm`, window.location.origin).href;
+
+    const res = await fetch(jsUrl);
+    if (!res.ok) throw new Error(`fetch bee_sdk.js: HTTP ${res.status}`);
+    let src = await res.text();
+
+    // Strip `export ` prefix from class/function/const/let/var declarations
+    src = src.replace(/^export\s+(class|function|async\s+function|const|let|var)\s/gm, '$1 ');
+    // Strip standalone `export { ... }` lines (e.g. the trailing manifest)
+    src = src.replace(/^export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+    // Replace `import.meta.url` with the JS file URL string (so the SDK's
+    // `new URL('bee_sdk_bg.wasm', import.meta.url)` still resolves correctly)
+    src = src.replace(/import\.meta\.url/g, JSON.stringify(jsUrl));
+    // Append the namespace export
+    src += `\nreturn { Miner, gen_mining_keys, get_miner_address_by_wallet_name, ensure_mining_keys_propagated, initSync, default: __wbg_init };`;
+
+    // eslint-disable-next-line no-new-func
+    const ns = (new Function(src)()) as BeeSdkNamespace;
+    if (!ns || typeof ns.default !== 'function') {
+      throw new Error('bee-sdk loader: __wbg_init not found');
+    }
+
+    // Initialise WASM
+    const wasmHandle = await ns.default(wasmUrl);
+    if (!wasmHandle) throw new Error('bee-sdk loader: WASM init returned null/undefined');
+
+    // Smoke test (Mining Hub does the same with all-zeros key)
+    try {
+      await ns.gen_mining_keys('0x0000000000000000000000000000000000000000000000000000000000000000');
+    } catch (e: unknown) {
+      if (e instanceof TypeError && String(e).includes('undefined')) {
+        throw new Error(`bee-sdk WASM verification failed: ${e.message}`);
+      }
+      // Any other error is a normal "invalid input" rejection — WASM is alive.
+    }
+
+    beeSdkNs = ns;
+    return ns;
+  })();
+
+  try {
+    return await beeSdkLoading;
+  } catch (e) {
+    beeSdkLoading = null;
+    beeSdkNs = null;
+    throw e;
+  }
+}
 
 // ═══ Resilient WebSocket wrapper ═══
 // Replaces globalThis.WebSocket so any WebSocket opened by the Bee SDK (GQL
@@ -186,21 +290,13 @@ export const APP_ID =
 // in the endpoint string.
 export const ENDPOINTS = ['https://mainnet-cf.ackinacki.org'];
 
-// ═══ WASM path ═══
-// Uses Vite's BASE_URL so it always matches vite.config.ts `base`.
-// File is served from public/bee_sdk_bg.wasm
-const WASM_PATH = `${import.meta.env.BASE_URL}bee_sdk_bg.wasm`;
-
-let wasmInitialized = false;
 let currentMiner: Miner | null = null;
 
-// ═══ Initialize WASM (call once) ═══
+// ═══ Initialize Bee SDK (call once — fetches JS+WASM from public/bee-sdk/) ═══
 export async function initBeeSDK(): Promise<void> {
-  if (wasmInitialized) return;
   // Patch WebSocket before SDK spins up any internal connections.
   installResilientWs();
-  await init({ module_or_path: WASM_PATH });
-  wasmInitialized = true;
+  await loadBeeSdkNamespace();
 }
 
 // ═══ Deep-link builder for AN Wallet ═══
@@ -278,24 +374,23 @@ export async function buildSetMiningKeysDeepLink(
 
 // ═══ Step 2 — Generate mining keys + signed deep link ═══
 export async function generateMiningKeys(walletName: string) {
-  if (!wasmInitialized) await initBeeSDK();
-  const result = await gen_mining_keys(APP_ID);
-  const deepLink = await buildSetMiningKeysDeepLink(
-    result.public,
-    result.secret,
-    walletName
-  );
-  return {
-    deepLink,
-    publicKey: result.public,
-    secretKey: result.secret,
-  };
+  await initBeeSDK();
+  const sdk = getBeeSdk();
+  const result = await sdk.gen_mining_keys(APP_ID);
+  const publicKey = result.public ?? result.public_key ?? result.publicKey;
+  const secretKey = result.secret ?? result.secret_key ?? result.secretKey;
+  if (!publicKey || !secretKey) {
+    throw new Error(`gen_mining_keys returned empty keys: ${JSON.stringify(result)}`);
+  }
+  const deepLink = await buildSetMiningKeysDeepLink(publicKey, secretKey, walletName);
+  return { deepLink, publicKey, secretKey };
 }
 
 // ═══ Step 3 — Resolve wallet name to miner contract address ═══
 export async function resolveMinerAddress(walletName: string): Promise<string> {
-  if (!wasmInitialized) await initBeeSDK();
-  return await get_miner_address_by_wallet_name({
+  await initBeeSDK();
+  const sdk = getBeeSdk();
+  return await sdk.get_miner_address_by_wallet_name({
     client_config: { network: { endpoints: ENDPOINTS } },
     wallet_name: walletName,
   });
@@ -376,14 +471,15 @@ export async function createMiner(
   publicKey: string,
   secretKey: string
 ): Promise<Miner> {
-  if (!wasmInitialized) await initBeeSDK();
+  await initBeeSDK();
+  const sdk = getBeeSdk();
 
   if (currentMiner) {
     try { currentMiner.free(); } catch {}
     currentMiner = null;
   }
 
-  const miner = await Miner.new(ENDPOINTS, APP_ID, minerAddress, publicKey, secretKey);
+  const miner = await sdk.Miner.new(ENDPOINTS, APP_ID, minerAddress, publicKey, secretKey);
   currentMiner = miner;
   return miner;
 }
@@ -402,15 +498,14 @@ export async function reinitMiner(
   publicKey: string,
   secretKey: string
 ): Promise<boolean> {
-  if (!wasmInitialized) {
-    try { await initBeeSDK(); } catch { return false; }
-  }
+  try { await initBeeSDK(); } catch { return false; }
+  const sdk = getBeeSdk();
   if (currentMiner) {
     try { currentMiner.free(); } catch {}
     currentMiner = null;
   }
   try {
-    currentMiner = await Miner.new(ENDPOINTS, APP_ID, minerAddress, publicKey, secretKey);
+    currentMiner = await sdk.Miner.new(ENDPOINTS, APP_ID, minerAddress, publicKey, secretKey);
     return true;
   } catch (e) {
     console.error('[bee-sdk] reinitMiner failed:', e);

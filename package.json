@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@teamgosh/bee-sdk": "^0.1.0",
     "js-sha256": "^0.11.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
