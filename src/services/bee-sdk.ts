@@ -387,12 +387,16 @@ export async function generateMiningKeys(walletName: string) {
 }
 
 // ═══ Step 3 — Resolve wallet name to miner contract address ═══
+// AN wallet names are case-insensitive in the dispatcher but the SDK's
+// get_miner_address_by_wallet_name compares literally. Lower-case the input
+// so "WalletAle" and "walletale" both resolve to the same miner contract.
 export async function resolveMinerAddress(walletName: string): Promise<string> {
   await initBeeSDK();
   const sdk = getBeeSdk();
+  const normalized = walletName.trim().toLowerCase();
   return await sdk.get_miner_address_by_wallet_name({
     client_config: { network: { endpoints: ENDPOINTS } },
-    wallet_name: walletName,
+    wallet_name: normalized,
   });
 }
 

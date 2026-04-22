@@ -31,6 +31,7 @@ import {
   guessMamaboard,
 } from './services/mamaboard';
 import { detectLang, isRTL, t, type Lang } from './services/i18n';
+import { MusicVisualizer } from './components/MusicVisualizer';
 
 type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 'error';
 
@@ -72,6 +73,13 @@ const EPOCH_COOLDOWN_MS = 60_000;
 // Specific error backoffs.
 const QUEUE_OVERFLOW_COOLDOWN_MS = 30_000;
 const MINER_CORRUPTED_COOLDOWN_MS = 15_000;
+
+// Auto-refresh cadences — kept deliberately low-frequency to save bandwidth
+// and respect on-chain read limits.
+const WALLET_REFRESH_MS = 60_000;        // 4 boxes: NACKL free / SHELL / USDC / Locked
+const NACKL_EARN_REFRESH_MS = 330_000;   // 24h earnings + last session delta
+const SESSION_GAIN_DELAY_MS = 8_000;     // wait this long after session_accepted to read locked
+const LOCKED_HISTORY_24H_MS = 24 * 3_600_000;
 
 // Gap between sessions: poll can_start() every 1s for the first "quick" window,
 // then fall back to a slow 30s retry so we don't hammer the SDK while the
@@ -167,6 +175,26 @@ export default function App() {
   const queueOverflowRef = useRef(false);
   const minerCorruptedRef = useRef(false);
 
+  // Auto-mining: when true, the Stop button was pressed explicitly — mining
+  // stays off even while music is playing. Reset on manual Start.
+  const manualStopRef = useRef(false);
+  const [autoMode, setAutoMode] = useState(true);
+
+  // Session-gain tracking: capture Locked value before each session, compare
+  // after session_accepted (with a small delay so chain can settle).
+  const lockedBeforeSessionRef = useRef<number | null>(null);
+  const [lastSessionGain, setLastSessionGain] = useState<number | null>(null);
+  const [lastSessionGainAt, setLastSessionGainAt] = useState<number | null>(null);
+
+  // Visualiser triggers (parent increments counters; child animates)
+  const [tapPulseCounter, setTapPulseCounter] = useState(0);
+  const [trackChangeCounter, setTrackChangeCounter] = useState(0);
+
+  // Auto-refresh bookkeeping (for the "fresh" dot blink)
+  const [walletRefreshAt, setWalletRefreshAt] = useState<number | null>(null);
+  const [walletJustRefreshed, setWalletJustRefreshed] = useState(false);
+  const [lockedRefreshAt, setLockedRefreshAt] = useState<number | null>(null);
+
   // ═══ Mining auth ═══
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [authError, setAuthError] = useState('');
@@ -226,6 +254,7 @@ export default function App() {
     addLog(`Monitoring Last.fm: ${lastfmUser}`);
     const monitor = new TrackMonitor(lastfmUser, (track) => {
       setCurrentTrack(track);
+      setTrackChangeCounter((n) => n + 1);
       addLog(`♪ ${track.artist} — ${track.title}`);
     });
     monitor.start(15000);
@@ -236,18 +265,41 @@ export default function App() {
     };
   }, [lastfmUser]);
 
+  // ═══ Auto-mining — follows Last.fm playback ═══
+  // Music playing + not manually stopped → start mining.
+  // Music stopped while mining is active → auto-pause (keeps manualStop flag).
+  useEffect(() => {
+    const isReadyNow = authState === 'ready' && !!storedKeys;
+    if (!isReadyNow) return;
+    if (!lastfmUser) return;
+
+    if (currentTrack && !manualStopRef.current && !miningActive) {
+      addLog('🎵 Music detected — auto-starting mining');
+      handleStartMining(false);
+    } else if (!currentTrack && miningActive && !manualStopRef.current) {
+      addLog('🔇 No music — auto-pausing mining');
+      handleStopMining(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack, authState, storedKeys, lastfmUser]);
+
   // ═══ Wallet balance refresh ═══
-  async function refreshBalance(address: string) {
-    setWalletLoading(true);
+  async function refreshBalance(address: string, silent = false) {
+    if (!silent) setWalletLoading(true);
     try {
       const bal = await getWalletBalance(address);
       setWalletBalance(bal);
-      if (bal.found) addLog(`Balance loaded from ${bal.network}`);
-      else addLog(`Wallet not found: ${bal.error}`);
+      setWalletRefreshAt(Date.now());
+      setWalletJustRefreshed(true);
+      window.setTimeout(() => setWalletJustRefreshed(false), 900);
+      if (!silent) {
+        if (bal.found) addLog(`Balance loaded from ${bal.network}`);
+        else addLog(`Wallet not found: ${bal.error}`);
+      }
     } catch (e: any) {
-      addLog(`Balance error: ${e.message}`);
+      if (!silent) addLog(`Balance error: ${e.message}`);
     } finally {
-      setWalletLoading(false);
+      if (!silent) setWalletLoading(false);
     }
   }
 
@@ -274,12 +326,14 @@ export default function App() {
   }
 
   async function handleAuthorizeMining() {
-    const name = walletNameInput.trim();
+    const name = walletNameInput.trim().toLowerCase();
     if (!name) {
       addLog('Enter wallet name first');
       return;
     }
     localStorage.setItem('lm_wallet_name', name);
+    // Reflect the normalised value back in the input for clarity.
+    setWalletNameInput(name);
 
     setAuthState('generating');
     setAuthError('');
@@ -386,6 +440,7 @@ export default function App() {
       if (addTap(x, y)) {
         tapsCountRef.current += 1;
         setTapsCount(tapsCountRef.current);
+        setTapPulseCounter((n) => n + 1);
       }
     }, TAP_INTERVAL_MS);
   }
@@ -454,6 +509,12 @@ export default function App() {
     const genAtStart = ++sessionGenRef.current;
     sessionCountRef.current += 1;
     setSessionCount(sessionCountRef.current);
+    // Capture current Locked NACKL so we can compute per-session delta on
+    // session_accepted (if known; otherwise the first accepted session will
+    // set the baseline and subsequent ones will show a real delta).
+    if (lockedBeforeSessionRef.current === null && lockedSamples.length > 0) {
+      lockedBeforeSessionRef.current = lockedSamples[0].value;
+    }
     addLog(`▶ Session ${sessionCountRef.current}: start (${SESSION_DURATION_MS / 1000}s, tap every ${(TAP_INTERVAL_MS / 1000).toFixed(2)}s → ~${Math.round(SESSION_DURATION_MS / TAP_INTERVAL_MS)} taps)…`);
 
     const ok = startMiningSession(SESSION_DURATION_MS, (event) => handleSdkEvent(event, genAtStart));
@@ -635,6 +696,39 @@ export default function App() {
     if (kind === 'session_accepted') {
       rejectionCountRef.current = 0;
       addLog('✓ session_accepted by network');
+      // Schedule a delayed Locked read so chain can settle, then compute delta.
+      const before = lockedBeforeSessionRef.current;
+      const popit = mamaboardInput.trim();
+      if (popit) {
+        window.setTimeout(async () => {
+          try {
+            const after = await getLockedNackl(popit);
+            if (before !== null) {
+              const gain = after.nackl - before;
+              setLastSessionGain(gain);
+              setLastSessionGainAt(Date.now());
+              addLog(`💎 Session gain: ${gain >= 0 ? '+' : ''}${gain.toFixed(4)} NACKL`);
+            }
+            lockedBeforeSessionRef.current = after.nackl;
+            // Keep the locked-samples history up to date
+            setLockedSamples((prev) => {
+              const latest = prev[0];
+              if (latest && latest.value === after.nackl) return prev;
+              const sample: LockedSample = {
+                value: after.nackl,
+                timestamp: after.timestamp,
+                source: 'auto',
+              };
+              const next: LockedSample[] = [sample, ...prev].slice(0, 200);
+              localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
+              return next;
+            });
+            setLockedRefreshAt(Date.now());
+          } catch (e: any) {
+            addLog(`✗ post-session locked read failed: ${e?.message ?? e}`);
+          }
+        }, SESSION_GAIN_DELAY_MS);
+      }
       return;
     }
 
@@ -653,9 +747,16 @@ export default function App() {
     }
   }
 
-  function handleStartMining() {
+  // `manual=true` means user explicitly pressed Start/Stop. Auto-mining (music
+  // driven) calls these with manual=false so they don't override the user's
+  // last explicit choice.
+  function handleStartMining(manual = true) {
     if (miningActive) return;
-    addLog(`▶ Mining started: ${SESSION_DURATION_MS / 1000}s sessions back-to-back (~${Math.round(SESSION_DURATION_MS / TAP_INTERVAL_MS)} taps each), reward poll every ${REWARD_POLL_MS / 1000}s. Runs until Stop.`);
+    if (manual) {
+      manualStopRef.current = false;
+      setAutoMode(true);
+    }
+    addLog(`▶ Mining started: ${SESSION_DURATION_MS / 1000}s sessions back-to-back (~${Math.round(SESSION_DURATION_MS / TAP_INTERVAL_MS)} taps each), reward poll every ${REWARD_POLL_MS / 1000}s.`);
     shouldAutoRestartRef.current = true;
     sessionCountRef.current = 0;
     rejectionCountRef.current = 0;
@@ -668,12 +769,18 @@ export default function App() {
     startNextSession();
   }
 
-  function handleStopMining() {
+  function handleStopMining(manual = true) {
     shouldAutoRestartRef.current = false;
     clearAllMiningTimers();
     stopMining();
     setMiningActive(false);
-    addLog(`⏹ Stopped. Sessions completed: ${sessionCountRef.current}, taps in last session: ${tapsCountRef.current}`);
+    if (manual) {
+      manualStopRef.current = true;
+      setAutoMode(false);
+      addLog(`⏹ Manually stopped. Sessions: ${sessionCountRef.current}, taps in last session: ${tapsCountRef.current}`);
+    } else {
+      addLog(`⏸ Auto-paused (music stopped). Sessions: ${sessionCountRef.current}`);
+    }
   }
 
   // ═══ Debug runner — fetches on-chain state for the miner contract ═══
@@ -824,6 +931,7 @@ export default function App() {
     setLockedReadLoading(true);
     try {
       const read = await getLockedNackl(addr);
+      setLockedRefreshAt(Date.now());
       setLockedSamples(prev => {
         const latest = prev[0];
         if (latest && latest.value === read.nackl) {
@@ -835,7 +943,7 @@ export default function App() {
           timestamp: read.timestamp,
           source: 'auto',
         };
-        const next: LockedSample[] = [autoSample, ...prev].slice(0, 50);
+        const next: LockedSample[] = [autoSample, ...prev].slice(0, 200);
         localStorage.setItem(LOCKED_SAMPLES_KEY, JSON.stringify(next));
         if (!silent) addLog(`✓ Locked NACKL: ${read.nackl.toFixed(4)} (${read.network})`);
         return next;
@@ -875,6 +983,25 @@ export default function App() {
     return { latest, oldest, delta, elapsedMs, rateNacklPerHour: rate };
   })();
 
+  // 24h earnings: find the newest sample with ts ≤ (now - 24h), compute
+  // latest - that. If no sample is old enough, fall back to the oldest
+  // available and annotate the window duration so the user knows it's partial.
+  const earn24h = (() => {
+    if (lockedSamples.length < 2) return null;
+    const latest = lockedSamples[0];
+    const cutoff = Date.now() - LOCKED_HISTORY_24H_MS;
+    // lockedSamples[0] is newest, so iterate from newest to oldest and pick
+    // the first sample past the cutoff.
+    let anchor = lockedSamples[lockedSamples.length - 1];
+    for (const s of lockedSamples) {
+      if (s.timestamp <= cutoff) { anchor = s; break; }
+    }
+    const full = anchor.timestamp <= cutoff;
+    const delta = latest.value - anchor.value;
+    const spanMs = latest.timestamp - anchor.timestamp;
+    return { delta, spanMs, full };
+  })();
+
   function formatLockedDuration(ms: number): string {
     if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
     if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
@@ -883,21 +1010,38 @@ export default function App() {
     return m > 0 ? `${h}h ${m}m` : `${h}h`;
   }
 
-  // Auto-read locked NACKL every 60s while a mining session is active.
-  // On-demand ("Read now") button handles the idle case.
+  // ═══ Auto-refresh cadences ═══
+  // Wallet balance: every 60s while a wallet is connected.
   useEffect(() => {
-    if (!miningActive) return;
-    if (!mamaboardInput.trim()) return;
-    const id = window.setInterval(() => { readLockedNow(true); }, 60_000);
+    if (!storedKeys) return;
+    refreshBalance(storedKeys.minerAddress, true);
+    const id = window.setInterval(
+      () => { refreshBalance(storedKeys.minerAddress, true); },
+      WALLET_REFRESH_MS,
+    );
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [miningActive, mamaboardInput]);
+  }, [storedKeys]);
 
-  // One-shot read on mount if we already have a Mamaboard address cached.
+  // NACKL Locked earnings: refresh every 330s (not real-time — chain settle time)
   useEffect(() => {
-    if (mamaboardInput.trim()) readLockedNow(true);
+    if (!mamaboardInput.trim()) return;
+    readLockedNow(true);
+    const id = window.setInterval(() => { readLockedNow(true); }, NACKL_EARN_REFRESH_MS);
+    return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mamaboardInput]);
+
+  // Auto-discover Popit Game contract when the wallet address is known and
+  // we don't have one yet. Runs once per wallet-address change.
+  useEffect(() => {
+    const wallet = walletAddressInput.trim();
+    if (!wallet) return;
+    if (mamaboardInput.trim()) return;       // already have one
+    if (discoveryLoading) return;
+    handleDiscoverMamaboard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddressInput]);
 
   function handleDisconnectWallet() {
     if (miningActive) handleStopMining();
@@ -923,6 +1067,13 @@ export default function App() {
         </div>
         <div className="header__sub">{t(lang, 'subtitle')}</div>
       </header>
+
+      {/* ═══ MUSIC VISUALIZER ═══ */}
+      <MusicVisualizer
+        playing={!!currentTrack}
+        tapPulse={tapPulseCounter}
+        trackChange={trackChangeCounter}
+      />
 
       {/* ═══ WALLET CARD ═══ */}
       <div className={`card ${isReady ? 'card--mining' : 'card--glow'}`}>
@@ -1026,26 +1177,41 @@ export default function App() {
             </div>
 
             {walletBalance?.found && (
-              <div className="wallet-grid">
-                <div className="wallet-stat">
-                  <div className="wallet-stat__label">{t(lang, 'nacklFree')}</div>
-                  <div className="wallet-stat__value">{walletBalance.nacklFree}</div>
-                </div>
-                <div className="wallet-stat">
-                  <div className="wallet-stat__label">{t(lang, 'shell')}</div>
-                  <div className="wallet-stat__value">{walletBalance.shell}</div>
-                </div>
-                <div className="wallet-stat">
-                  <div className="wallet-stat__label">{t(lang, 'usdc')}</div>
-                  <div className="wallet-stat__value">{walletBalance.usdc}</div>
-                </div>
-                <div className="wallet-stat">
-                  <div className="wallet-stat__label">{t(lang, 'network')}</div>
-                  <div className="wallet-stat__value wallet-stat__value--small">
+              <>
+                <div className="wallet-grid__head">
+                  <span style={{ fontSize: 10, letterSpacing: 1.2, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>
                     {walletBalance.network}
+                  </span>
+                  <span className={`refresh-ind ${walletJustRefreshed ? 'refresh-ind--fresh' : ''}`}>
+                    <span className="refresh-ind__dot" />
+                    {walletRefreshAt
+                      ? `${Math.max(0, Math.round((Date.now() - walletRefreshAt) / 1000))}s ago`
+                      : '—'}
+                  </span>
+                </div>
+                <div className="wallet-grid">
+                  <div className="wallet-stat">
+                    <div className="wallet-stat__label">{t(lang, 'nacklFree')}</div>
+                    <div className="wallet-stat__value">{walletBalance.nacklFree}</div>
+                  </div>
+                  <div className="wallet-stat">
+                    <div className="wallet-stat__label">{t(lang, 'shell')}</div>
+                    <div className="wallet-stat__value">{walletBalance.shell}</div>
+                  </div>
+                  <div className="wallet-stat">
+                    <div className="wallet-stat__label">{t(lang, 'usdc')}</div>
+                    <div className="wallet-stat__value">{walletBalance.usdc}</div>
+                  </div>
+                  <div className="wallet-stat">
+                    <div className="wallet-stat__label">NACKL LOCKED</div>
+                    <div className="wallet-stat__value">
+                      {lockedSamples.length > 0
+                        ? lockedSamples[0].value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                        : '—'}
+                    </div>
                   </div>
                 </div>
-              </div>
+              </>
             )}
 
             <button
@@ -1067,150 +1233,103 @@ export default function App() {
         )}
       </div>
 
-      {/* ═══ NACKL LOCKED TRACKER CARD ═══ */}
+      {/* ═══ NACKL EARNINGS (simplified) ═══ */}
       {storedKeys && (
         <div className="card">
-          <div className="card__label">🔒 {t(lang, 'lockedTitle')}</div>
-          <div className="locked-hint">{t(lang, 'lockedHint')}</div>
+          <div className="card__label">💎 NACKL Earnings</div>
 
-          {/* Current value + delta + rate */}
-          {lockedStats ? (
-            <div className="locked-stats">
-              <div className="locked-stat">
-                <div className="locked-stat__label">{t(lang, 'latest')}</div>
-                <div className="locked-stat__value">
-                  {lockedStats.latest.value.toLocaleString('en-US', {
-                    minimumFractionDigits: 2, maximumFractionDigits: 2,
-                  })}
-                </div>
-                <div className="locked-stat__sub">
-                  {new Date(lockedStats.latest.timestamp).toLocaleTimeString()}
-                </div>
-              </div>
-              <div className="locked-stat">
-                <div className="locked-stat__label">{t(lang, 'delta')}</div>
-                <div className={`locked-stat__value ${lockedStats.delta >= 0 ? 'locked-stat__value--pos' : 'locked-stat__value--neg'}`}>
-                  {lockedStats.delta >= 0 ? '+' : ''}{lockedStats.delta.toFixed(4)}
-                </div>
-                <div className="locked-stat__sub">
-                  {formatLockedDuration(lockedStats.elapsedMs)}
-                </div>
-              </div>
-              <div className="locked-stat">
-                <div className="locked-stat__label">{t(lang, 'ratePerHour')}</div>
-                <div className="locked-stat__value">
-                  {lockedStats.rateNacklPerHour.toFixed(4)}
-                </div>
-                <div className="locked-stat__sub">·</div>
-              </div>
+          <div className="earn-grid">
+            <div
+              className={`earn-stat ${earn24h && earn24h.delta > 0 ? 'earn-stat--gained' : ''}`}
+            >
+              <div className="earn-stat__label">Last 24h</div>
+              {earn24h ? (
+                <>
+                  <div className={`earn-stat__value ${earn24h.delta > 0 ? 'earn-stat__value--pos' : earn24h.delta < 0 ? 'earn-stat__value--neg' : ''}`}>
+                    {earn24h.delta >= 0 ? '+' : ''}{earn24h.delta.toFixed(4)}
+                  </div>
+                  <div className="earn-stat__sub">
+                    {earn24h.full
+                      ? 'NACKL in 24h'
+                      : `partial window · ${formatLockedDuration(earn24h.spanMs)}`}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="earn-stat__value earn-stat__value--dim">—</div>
+                  <div className="earn-stat__sub">need more history</div>
+                </>
+              )}
             </div>
-          ) : lockedSamples.length === 1 ? (
-            <div className="locked-single">
-              {lockedSamples[0].value.toLocaleString('en-US', {
-                minimumFractionDigits: 2, maximumFractionDigits: 2,
-              })} NACKL · {new Date(lockedSamples[0].timestamp).toLocaleTimeString()}
-            </div>
-          ) : (
-            <div className="locked-empty">{t(lang, 'noSamples')}</div>
-          )}
 
-          {/* Wallet address + auto-discover */}
-          <div className="locked-field-label">{t(lang, 'walletAddressLabel')}</div>
+            <div
+              className={`earn-stat ${lastSessionGain !== null && lastSessionGain > 0 ? 'earn-stat--gained earn-stat--new' : ''}`}
+              key={`session-${lastSessionGainAt ?? 0}`}
+            >
+              <div className="earn-stat__label">Last session</div>
+              {lastSessionGain !== null ? (
+                <>
+                  <div className={`earn-stat__value ${lastSessionGain > 0 ? 'earn-stat__value--pos' : lastSessionGain < 0 ? 'earn-stat__value--neg' : ''}`}>
+                    {lastSessionGain >= 0 ? '+' : ''}{lastSessionGain.toFixed(4)}
+                  </div>
+                  <div className="earn-stat__sub">
+                    {lastSessionGainAt
+                      ? `${Math.max(0, Math.round((Date.now() - lastSessionGainAt) / 60_000))}m ago`
+                      : 'just now'}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="earn-stat__value earn-stat__value--dim">—</div>
+                  <div className="earn-stat__sub">waiting for a session</div>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Wallet address (auto-discovers Popit Game contract on paste) */}
+          <div className="locked-field-label" style={{ marginTop: 16 }}>
+            Your AN Wallet address
+          </div>
           <input
             type="text"
             className="input-field"
-            placeholder={t(lang, 'walletAddressPh')}
+            placeholder="0:… paste your wallet address"
             value={walletAddressInput}
             onChange={e => persistWalletAddress(e.target.value)}
             spellCheck={false}
-            style={{ marginBottom: 6 }}
           />
-          <button
-            className="btn btn--full"
-            onClick={handleDiscoverMamaboard}
-            disabled={!walletAddressInput.trim() || discoveryLoading}
-            style={{ marginBottom: 10 }}
-          >
-            {discoveryLoading ? `⏳ ${t(lang, 'discovering')}` : `🔍 ${t(lang, 'autoDiscover')}`}
-          </button>
 
-          {/* Mamaboard address + read now */}
-          <div className="locked-field-label">{t(lang, 'mamaboardLabel')}</div>
+          {/* Popit Game address — auto-filled, editable as fallback */}
+          <div className="locked-field-label" style={{ marginTop: 10 }}>
+            Popit Game contract
+            {discoveryLoading && <span style={{ marginLeft: 8, color: 'var(--text-muted)', textTransform: 'none', letterSpacing: 0 }}>· discovering…</span>}
+          </div>
           <input
             type="text"
             className="input-field"
-            placeholder={t(lang, 'mamaboardPh')}
+            placeholder="auto-detected from wallet — or paste manually"
             value={mamaboardInput}
             onChange={e => persistMamaboard(e.target.value)}
             spellCheck={false}
-            style={{ marginBottom: 6 }}
           />
-          <button
-            className="btn btn--primary btn--full"
-            onClick={() => readLockedNow(false)}
-            disabled={!mamaboardInput.trim() || lockedReadLoading}
-          >
-            {lockedReadLoading ? `⏳ ${t(lang, 'reading')}` : `⚡ ${t(lang, 'readNow')}`}
-          </button>
 
-          {/* Manual fallback (collapsible) */}
-          <button
-            className="locked-manual-toggle"
-            onClick={() => setShowManualEntry(s => !s)}
-          >
-            {showManualEntry ? '▼' : '▶'} {t(lang, 'addManual')}
-          </button>
-          {showManualEntry && (
-            <div className="locked-manual-inputs">
-              <input
-                type="text"
-                className="input-field"
-                inputMode="decimal"
-                placeholder={t(lang, 'manualValuePh')}
-                value={newSampleValue}
-                onChange={e => setNewSampleValue(e.target.value)}
-              />
-              <input
-                type="text"
-                className="input-field"
-                placeholder={t(lang, 'manualNotePh')}
-                value={newSampleNote}
-                onChange={e => setNewSampleNote(e.target.value)}
-              />
-              <button
-                className="btn"
-                onClick={handleAddManualSample}
-                disabled={!newSampleValue.trim()}
-              >
-                {t(lang, 'add')}
-              </button>
-            </div>
-          )}
-
-          {/* Samples list */}
-          {lockedSamples.length > 0 && (
-            <div className="locked-samples-list">
-              {lockedSamples.slice(0, 10).map((s, i) => (
-                <div key={`${s.timestamp}-${i}`} className="locked-sample-row">
-                  <span className={`locked-sample-src locked-sample-src--${s.source}`}>
-                    {s.source}
-                  </span>
-                  <span className="locked-sample-value">{s.value.toFixed(4)}</span>
-                  <span className="locked-sample-ts">
-                    {new Date(s.timestamp).toLocaleString()}
-                    {s.note && ` — ${s.note}`}
-                  </span>
-                  <button
-                    className="locked-sample-del"
-                    onClick={() => handleDeleteLockedSample(i)}
-                    title="Delete"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <div className="earn-footer">
+            <span>
+              {lockedRefreshAt
+                ? `updated ${Math.max(0, Math.round((Date.now() - lockedRefreshAt) / 1000))}s ago`
+                : 'waiting for first read'}
+              {mamaboardInput.trim() && ' · refresh every 330s'}
+            </span>
+            <button
+              className="earn-popit"
+              onClick={() => readLockedNow(false)}
+              disabled={!mamaboardInput.trim() || lockedReadLoading}
+              title="Read Locked NACKL now"
+            >
+              {lockedReadLoading ? '…' : '↻ refresh'}
+            </button>
+          </div>
         </div>
       )}
 
@@ -1265,12 +1384,27 @@ export default function App() {
         <div className={`card ${miningActive ? 'card--mining' : ''}`}>
           <div className="card__label">{t(lang, 'miningStatus')}</div>
 
+          {/* Auto / waiting / manual mode indicator */}
+          {(() => {
+            const mode = !autoMode
+              ? { cls: 'mine-mode--manual', text: '🛑 Manually stopped — mining won\'t auto-resume until you press Start' }
+              : miningActive
+                ? { cls: 'mine-mode--active', text: '🎵 Auto-mining — follows the music' }
+                : { cls: 'mine-mode--waiting', text: '⏸ Waiting for music…' };
+            return (
+              <div className={`mine-mode ${mode.cls}`} style={{ marginBottom: 10 }}>
+                <span className="mine-mode__dot" />
+                {mode.text}
+              </div>
+            );
+          })()}
+
           <div className="mining-status">
             <span className={`badge ${miningActive ? 'badge--success' : 'badge--idle'}`}>
               {miningActive ? `▶ ${t(lang, 'mining')}` : `⏸ ${t(lang, 'notMining')}`}
             </span>
             {miningActive && (
-              <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+              <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
                 Session <strong>#{sessionCount}</strong> · {t(lang, 'sessionTaps')}: <strong>{tapsCount}</strong>
               </span>
             )}
@@ -1278,18 +1412,18 @@ export default function App() {
 
           <div style={{ marginTop: 12 }}>
             {!miningActive ? (
-              <button className="btn btn--primary btn--full" onClick={handleStartMining}>
-                {t(lang, 'startMining')}
+              <button className="btn btn--primary btn--full" onClick={() => handleStartMining(true)}>
+                {autoMode ? t(lang, 'startMining') : `${t(lang, 'startMining')} (resume auto-mode)`}
               </button>
             ) : (
-              <button className="btn btn--full" onClick={handleStopMining}>
+              <button className="btn btn--full" onClick={() => handleStopMining(true)}>
                 {t(lang, 'stopMining')}
               </button>
             )}
           </div>
           <div className="mining-info">
-            ℹ️ Rewards are collected automatically when session data is submitted on-chain.
-            Check your wallet balance after a few completed sessions.
+            ℹ️ Mining follows your Last.fm playback. Stop the button to override manually.
+            Rewards are collected automatically and land in your wallet after sessions settle on-chain.
           </div>
         </div>
       )}

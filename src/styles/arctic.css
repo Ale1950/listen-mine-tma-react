@@ -850,3 +850,326 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   background: rgba(56, 225, 255, 0.35);
   color: #fff;
 }
+
+/* ═══ Music Visualizer ═══ */
+.viz {
+  position: relative;
+  width: 240px;
+  height: 240px;
+  margin: 8px auto 12px;
+  display: grid;
+  place-items: center;
+  --viz-period: 2.2s;
+  isolation: isolate;
+}
+.viz__halo {
+  position: absolute;
+  inset: 20px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(56, 225, 255, 0.35) 0%, transparent 55%),
+    radial-gradient(circle at 70% 70%, rgba(255, 42, 138, 0.28) 0%, transparent 55%),
+    radial-gradient(circle at 50% 50%, rgba(139, 92, 246, 0.2) 0%, transparent 70%);
+  filter: blur(18px);
+  opacity: 0.6;
+  transition: opacity 0.6s ease, filter 0.6s ease;
+  animation: viz-halo-rotate 18s linear infinite;
+  z-index: -1;
+}
+@keyframes viz-halo-rotate {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.viz__ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid rgba(56, 225, 255, 0.4);
+  box-shadow:
+    0 0 18px rgba(56, 225, 255, 0.18),
+    inset 0 0 14px rgba(56, 225, 255, 0.1);
+  transition: opacity 0.6s ease, border-color 0.6s ease;
+}
+.viz__ring--1 { width: 76px;  height: 76px;  border-color: rgba(244, 247, 252, 0.65); }
+.viz__ring--2 { width: 130px; height: 130px; border-color: rgba(56, 225, 255, 0.55); }
+.viz__ring--3 { width: 180px; height: 180px; border-color: rgba(139, 92, 246, 0.5); }
+.viz__ring--4 { width: 226px; height: 226px; border-color: rgba(255, 42, 138, 0.42); }
+.viz--on .viz__ring {
+  animation: viz-ring-pulse var(--viz-period) ease-in-out infinite;
+}
+.viz--on .viz__ring--1 { animation-delay: 0s; }
+.viz--on .viz__ring--2 { animation-delay: calc(var(--viz-period) * 0.1); }
+.viz--on .viz__ring--3 { animation-delay: calc(var(--viz-period) * 0.2); }
+.viz--on .viz__ring--4 { animation-delay: calc(var(--viz-period) * 0.3); }
+@keyframes viz-ring-pulse {
+  0%,100% { transform: scale(1);    opacity: 0.55; }
+  50%     { transform: scale(1.06); opacity: 1; }
+}
+
+.viz__core {
+  position: relative;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 0%, #bdf2ff 35%, var(--neon-blue) 65%, transparent 100%);
+  box-shadow:
+    0 0 30px rgba(255, 255, 255, 0.7),
+    0 0 60px rgba(56, 225, 255, 0.55),
+    0 0 90px rgba(139, 92, 246, 0.35);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  z-index: 2;
+}
+.viz__core-inner {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 0%, transparent 75%);
+  filter: blur(1px);
+}
+.viz--on .viz__core { animation: viz-core-breathe calc(var(--viz-period) * 0.9) ease-in-out infinite; }
+@keyframes viz-core-breathe {
+  0%,100% { transform: scale(1);    filter: brightness(1); }
+  50%     { transform: scale(1.15); filter: brightness(1.35); }
+}
+
+.viz__beams {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.viz__beams--out { animation: viz-rotate 22s linear infinite; }
+.viz__beams--in  { animation: viz-rotate 28s linear infinite reverse; }
+@keyframes viz-rotate {
+  to { transform: rotate(360deg); }
+}
+.viz__beam {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 2px; height: 100px;
+  transform-origin: bottom center;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  border-radius: 2px;
+}
+.viz__beam--out {
+  background: linear-gradient(to top, transparent 0%, rgba(255,255,255,0.9) 70%, #ffffff 100%);
+  filter: blur(0.6px);
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.6);
+}
+.viz__beam--in {
+  background: linear-gradient(to top, rgba(56, 225, 255, 0.9) 0%, rgba(255, 42, 138, 0.85) 70%, transparent 100%);
+  filter: blur(0.6px);
+  box-shadow: 0 0 10px rgba(56, 225, 255, 0.5);
+}
+.viz--on .viz__beam--out { animation: viz-beam-out calc(var(--viz-period) * 1.3) ease-in-out infinite; }
+.viz--on .viz__beam--in  { animation: viz-beam-in  calc(var(--viz-period) * 1.5) ease-in-out infinite; }
+@keyframes viz-beam-out {
+  0%,100% { opacity: 0.15; height: 90px; }
+  50%     { opacity: 0.65; height: 115px; }
+}
+@keyframes viz-beam-in {
+  0%,100% { opacity: 0.1; height: 80px; }
+  50%     { opacity: 0.55; height: 108px; }
+}
+
+/* Stagger beams slightly */
+.viz__beams--out .viz__beam:nth-child(2n)   { animation-delay: 0.15s; }
+.viz__beams--out .viz__beam:nth-child(3n)   { animation-delay: 0.30s; }
+.viz__beams--in  .viz__beam:nth-child(2n)   { animation-delay: 0.25s; }
+.viz__beams--in  .viz__beam:nth-child(3n)   { animation-delay: 0.50s; }
+
+/* Off state: dim everything + pause animations */
+.viz--off .viz__halo { opacity: 0.1; filter: blur(30px); }
+.viz--off .viz__ring { opacity: 0.16; animation-play-state: paused; }
+.viz--off .viz__core { box-shadow: 0 0 14px rgba(56, 225, 255, 0.18); animation-play-state: paused; }
+.viz--off .viz__beam { opacity: 0.05; animation-play-state: paused; }
+.viz--off .viz__beams--out,
+.viz--off .viz__beams--in { animation-play-state: paused; }
+
+/* Track-change burst: temporary brightness boost */
+.viz--burst .viz__halo { opacity: 1; filter: blur(10px); transition: opacity 0.2s, filter 0.2s; }
+.viz--burst .viz__core {
+  transform: scale(1.35);
+  box-shadow:
+    0 0 60px rgba(255, 255, 255, 0.95),
+    0 0 120px rgba(56, 225, 255, 0.7),
+    0 0 180px rgba(139, 92, 246, 0.5);
+}
+.viz--burst .viz__ring { filter: brightness(1.6); }
+
+/* Tap flash: quick core pulse */
+.viz--flash .viz__core {
+  transform: scale(1.22);
+  box-shadow:
+    0 0 45px rgba(255, 255, 255, 0.9),
+    0 0 90px rgba(56, 225, 255, 0.75);
+}
+
+/* ═══ Auto-mining status line ═══ */
+.mine-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  margin-top: 6px;
+  border: 1px solid transparent;
+  background: var(--bg-surface);
+}
+.mine-mode__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.mine-mode--active {
+  color: var(--success);
+  border-color: rgba(43, 255, 176, 0.35);
+  background: rgba(43, 255, 176, 0.08);
+  box-shadow: 0 0 14px rgba(43, 255, 176, 0.18);
+}
+.mine-mode--active .mine-mode__dot {
+  background: var(--success);
+  box-shadow: 0 0 10px var(--success);
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+.mine-mode--waiting {
+  color: var(--neon-blue);
+  border-color: rgba(56, 225, 255, 0.3);
+  background: rgba(56, 225, 255, 0.06);
+}
+.mine-mode--waiting .mine-mode__dot {
+  background: var(--neon-blue);
+  box-shadow: 0 0 8px var(--neon-blue);
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+.mine-mode--manual {
+  color: var(--danger);
+  border-color: rgba(255, 73, 115, 0.35);
+  background: rgba(255, 73, 115, 0.08);
+}
+.mine-mode--manual .mine-mode__dot { background: var(--danger); }
+@keyframes dot-pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%     { opacity: 0.55; transform: scale(0.85); }
+}
+
+/* ═══ Wallet grid refresh indicator ═══ */
+.wallet-grid__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.refresh-ind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.refresh-ind__dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-dim);
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.refresh-ind--fresh .refresh-ind__dot {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: fresh-blink 0.9s ease-out;
+}
+@keyframes fresh-blink {
+  0%   { transform: scale(1.4); box-shadow: 0 0 14px var(--success); }
+  100% { transform: scale(1);   box-shadow: 0 0 6px var(--success); }
+}
+
+/* ═══ NACKL simple earnings (24h / last session) ═══ */
+.earn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.earn-stat {
+  background: linear-gradient(180deg, var(--bg-surface), rgba(26, 37, 66, 0.4));
+  border: 1px solid rgba(56, 225, 255, 0.2);
+  padding: 16px 14px;
+  border-radius: 14px;
+  position: relative;
+  overflow: hidden;
+}
+.earn-stat::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--neon-blue), transparent);
+  opacity: 0.55;
+}
+.earn-stat__label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.earn-stat__value {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  word-break: break-all;
+  line-height: 1.15;
+}
+.earn-stat__value--pos {
+  color: var(--success);
+  text-shadow: 0 0 14px rgba(43, 255, 176, 0.4);
+}
+.earn-stat__value--neg { color: var(--danger); }
+.earn-stat__value--dim { color: var(--text-muted); font-size: 14px; font-weight: 600; }
+.earn-stat__sub {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+}
+.earn-stat--gained {
+  border-color: rgba(43, 255, 176, 0.35);
+  background: linear-gradient(180deg, rgba(43, 255, 176, 0.06), rgba(26, 37, 66, 0.3));
+}
+.earn-stat--gained::after {
+  background: linear-gradient(90deg, transparent, var(--success), transparent);
+  opacity: 0.7;
+}
+
+/* Momentary highlight when fresh data arrives */
+.earn-stat--new {
+  animation: earn-highlight 1.6s ease-out;
+}
+@keyframes earn-highlight {
+  0%   { box-shadow: 0 0 0 0 rgba(43, 255, 176, 0); }
+  25%  { box-shadow: 0 0 26px 2px rgba(43, 255, 176, 0.5); }
+  100% { box-shadow: 0 0 0 0 rgba(43, 255, 176, 0); }
+}
+
+.earn-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+}
+.earn-popit {
+  font-family: var(--font-mono);
+  color: var(--neon-blue);
+  font-size: 10px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+}
+.earn-popit:hover { text-decoration: underline; }
