@@ -54,9 +54,24 @@ const TAP_INTERVAL_MS = 1_875;
 // get_reward() is what actually transfers NACKL to the miner contract.
 const REWARD_POLL_MS = 15_000;
 
-// Exponential backoff on submit_session_root errors: 5s, 10s, 20s, 40s, cap 60s.
+// Exponential backoff on submit_session_root errors: 5s, 10s, 20s, 40s, cap 120s.
 const BACKOFF_BASE_MS = 5_000;
-const BACKOFF_MAX_MS = 60_000;
+const BACKOFF_MAX_MS = 120_000;
+
+// Post-submit minimum cooldown: ALWAYS wait this long between sessions even
+// on the happy path. Mining Hub doesn't submit back-to-back — spacing protects
+// the blockchain from QUEUE_OVERFLOW + "server response: 502" errors we saw
+// echoed in the AN Wallet panel.
+const POST_SUBMIT_COOLDOWN_MS = 5_000;
+
+// Epoch boundary: after N sequential sessions, pause for a longer cooldown so
+// the chain can digest submissions. Mirrors Mining Hub's Gp=60_000 after xa=10.
+const SESSIONS_PER_EPOCH = 10;
+const EPOCH_COOLDOWN_MS = 60_000;
+
+// Specific error backoffs.
+const QUEUE_OVERFLOW_COOLDOWN_MS = 30_000;
+const MINER_CORRUPTED_COOLDOWN_MS = 15_000;
 
 // Gap between sessions: poll can_start() every 1s for the first "quick" window,
 // then fall back to a slow 30s retry so we don't hammer the SDK while the
@@ -148,6 +163,9 @@ export default function App() {
   // Bumps on every session (re)start; watchdog/event handlers check their
   // captured generation against this to ignore stale callbacks.
   const sessionGenRef = useRef(0);
+  // One-shot signals consumed by the next cooldown computation.
+  const queueOverflowRef = useRef(false);
+  const minerCorruptedRef = useRef(false);
 
   // ═══ Mining auth ═══
   const [authState, setAuthState] = useState<AuthState>('idle');
@@ -453,9 +471,9 @@ export default function App() {
     // Safety watchdog — ignored if generation already advanced.
     watchdogRef.current = window.setTimeout(() => {
       if (sessionGenRef.current !== genAtStart) return;
-      addLog(`⏱ Session ${sessionCountRef.current}: no SDK event within ${SESSION_WATCHDOG_MS / 1000}s — forcing next`);
+      addLog(`⏱ Session ${sessionCountRef.current}: no end event within ${SESSION_WATCHDOG_MS / 1000}s — forcing cooldown-aware next`);
       stopTapLoop();
-      scheduleNextSession();
+      scheduleEpochAwareNextSession();
     }, SESSION_WATCHDOG_MS);
   }
 
@@ -533,11 +551,68 @@ export default function App() {
     clearWatchdog();
     clearCanStartTimer();
     if (delayMs > 0) {
-      addLog(`⏳ Backoff ${(delayMs / 1000).toFixed(0)}s before next session attempt…`);
       canStartTimerRef.current = window.setTimeout(pollCanStartThenStart, delayMs);
     } else {
       pollCanStartThenStart();
     }
+  }
+
+  // Compute the right cooldown based on flags set during the session's SDK
+  // events, then schedule the next session. This is the ONLY entry point for
+  // "session ended, plan the next one" — `finished`/`removed` events and the
+  // safety watchdog both call it.
+  function scheduleEpochAwareNextSession() {
+    if (!shouldAutoRestartRef.current) return;
+
+    let delayMs = POST_SUBMIT_COOLDOWN_MS;
+    let reason = 'post-submit cooldown';
+    let needsReinit = false;
+
+    if (minerCorruptedRef.current) {
+      minerCorruptedRef.current = false;
+      delayMs = MINER_CORRUPTED_COOLDOWN_MS;
+      reason = 'miner_state_corrupted — reinit + wait';
+      needsReinit = true;
+    } else if (queueOverflowRef.current) {
+      queueOverflowRef.current = false;
+      delayMs = QUEUE_OVERFLOW_COOLDOWN_MS;
+      reason = 'QUEUE_OVERFLOW — message queue full';
+    } else if (rejectionCountRef.current >= 2) {
+      const n = rejectionCountRef.current;
+      delayMs = Math.min(BACKOFF_BASE_MS * Math.pow(2, n - 1), BACKOFF_MAX_MS);
+      reason = `${n} consecutive submit failures — exp backoff`;
+    } else if (
+      sessionCountRef.current > 0 &&
+      sessionCountRef.current % SESSIONS_PER_EPOCH === 0
+    ) {
+      delayMs = EPOCH_COOLDOWN_MS;
+      reason = `epoch ${sessionCountRef.current / SESSIONS_PER_EPOCH} complete (${SESSIONS_PER_EPOCH} sessions)`;
+    }
+
+    addLog(`⏸ Cooldown ${(delayMs / 1000).toFixed(0)}s — ${reason}`);
+
+    if (needsReinit) {
+      void (async () => {
+        await attemptReinit();
+        scheduleNextSession(delayMs);
+      })();
+    } else {
+      scheduleNextSession(delayMs);
+    }
+  }
+
+  function detectFailureSignals(event: any, error: string | undefined) {
+    const errTxt = (error || '').toLowerCase();
+    if (errTxt.includes('queue_overflow') || errTxt.includes('message queue is full')) {
+      queueOverflowRef.current = true;
+    }
+    const corrupted =
+      event?.data?.miner_state_corrupted === true ||
+      event?.miner_state_corrupted === true ||
+      (typeof event === 'object' &&
+        event !== null &&
+        (event.action === 'miner_state_corrupted' || event.type === 'miner_state_corrupted'));
+    if (corrupted) minerCorruptedRef.current = true;
   }
 
   function handleSdkEvent(event: any, gen: number) {
@@ -546,16 +621,14 @@ export default function App() {
 
     const { kind, data, error } = parseSdkEvent(event);
     addLog(`📡 SDK: ${kind}${error ? ` ERROR="${error}"` : ''}`);
+    detectFailureSignals(event, error);
 
     if (kind === 'submit_session_root') {
       if (error) {
         rejectionCountRef.current += 1;
-        const n = rejectionCountRef.current;
-        const backoff = Math.min(BACKOFF_BASE_MS * Math.pow(2, n - 1), BACKOFF_MAX_MS);
-        addLog(`⚠️ submit_session_root FAILED (#${n}): backoff ${(backoff / 1000).toFixed(0)}s`);
-        scheduleNextSession(backoff);
+        addLog(`⚠️ submit_session_root FAILED (#${rejectionCountRef.current}) — waiting for session end to apply cooldown`);
       }
-      // success: wait for session_accepted / finished
+      // Don't schedule here — the cooldown decision happens at session end.
       return;
     }
 
@@ -569,14 +642,14 @@ export default function App() {
       const status = (data && typeof data === 'object' ? data.status : '') as string;
       if (status === 'finished' || status === 'removed') {
         addLog(`🔚 Session ${sessionCountRef.current} ended (${status})`);
-        scheduleNextSession();
+        scheduleEpochAwareNextSession();
       }
       return;
     }
 
     if (kind === 'finished' || kind === 'removed') {
       addLog(`🔚 Session ${sessionCountRef.current} ended (${kind})`);
-      scheduleNextSession();
+      scheduleEpochAwareNextSession();
     }
   }
 
@@ -586,6 +659,8 @@ export default function App() {
     shouldAutoRestartRef.current = true;
     sessionCountRef.current = 0;
     rejectionCountRef.current = 0;
+    queueOverflowRef.current = false;
+    minerCorruptedRef.current = false;
     setSessionCount(0);
     setMiningActive(true);
     setSessionStart(Date.now());
@@ -1245,6 +1320,15 @@ export default function App() {
         </div>
         {showDebug && (
           <div className="debug-body">
+            <div className="debug-note">
+              <span className="debug-note__icon">ℹ️</span>
+              <div>
+                <div className="debug-note__title">AN Wallet errors are NOT related to Listen &amp; Mine</div>
+                <div className="debug-note__text">
+                  If the AN Wallet app shows messages like <code>query_active_sessions_by_multifactor failed</code>, <code>query_profiles_by_multifactor</code>, or <code>server response: error code: 502</code>, those are internal AN Wallet errors. They do not affect mining in Listen &amp; Mine — ignore them here.
+                </div>
+              </div>
+            </div>
             <div className="debug-hint">
               Use this panel to inspect on-chain state and copy a diagnostic dump.
             </div>
