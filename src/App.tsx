@@ -32,6 +32,8 @@ import {
 } from './services/mamaboard';
 import { detectLang, isRTL, t, type Lang } from './services/i18n';
 import { MusicVisualizer } from './components/MusicVisualizer';
+import { miningTimers } from './utils/miningTimers';
+import { startSilentKeepAlive, stopSilentKeepAlive, registerKeepAliveSw } from './utils/keepAlive';
 
 type AuthState = 'idle' | 'generating' | 'awaiting' | 'propagating' | 'ready' | 'error';
 
@@ -151,34 +153,24 @@ export default function App() {
   const [currentTrack, setCurrentTrack] = useState<LastFmTrack | null>(null);
   const trackMonitorRef = useRef<TrackMonitor | null>(null);
 
-  // Mining auto-tap loop (fires every TAP_INTERVAL_MS while session active).
-  // No external session-end timer: the SDK finalizes at duration_ms on its own.
-  const tapTimerRef = useRef<number | null>(null);
+  // Mining auto-tap loop. Timer lives in a Web Worker — main thread only
+  // holds a coord drift buffer + running tap counter.
   const tapCoordsRef = useRef({ x: 200, y: 200 });
   const tapsCountRef = useRef(0);
 
   // ═══ Session-loop orchestration (aligned with Mining Hub 1.2.2) ═══
-  // Each Start button press begins an "epoch" of up to MAX_SESSIONS_PER_EPOCH
-  // sequential 15s sessions. Between sessions we poll canStart() until true,
-  // then call startMiningSession() again. get_reward() polls independently
-  // every REWARD_POLL_MS while mining is active.
+  // Mining runs forever while music is playing. All timers (tap, reward,
+  // canStart, watchdog) are scheduled via miningTimers → Web Worker, so
+  // they don't get throttled when the tab is hidden.
   const shouldAutoRestartRef = useRef(false);
   const sessionCountRef = useRef(0);
   const rejectionCountRef = useRef(0);
-  const rewardPollRef = useRef<number | null>(null);
-  const canStartTimerRef = useRef<number | null>(null);
-  const watchdogRef = useRef<number | null>(null);
   // Bumps on every session (re)start; watchdog/event handlers check their
   // captured generation against this to ignore stale callbacks.
   const sessionGenRef = useRef(0);
   // One-shot signals consumed by the next cooldown computation.
   const queueOverflowRef = useRef(false);
   const minerCorruptedRef = useRef(false);
-
-  // Auto-mining: when true, the Stop button was pressed explicitly — mining
-  // stays off even while music is playing. Reset on manual Start.
-  const manualStopRef = useRef(false);
-  const [autoMode, setAutoMode] = useState(true);
 
   // Session-gain tracking: capture Locked value before each session, compare
   // after session_accepted (with a small delay so chain can settle).
@@ -266,22 +258,44 @@ export default function App() {
   }, [lastfmUser]);
 
   // ═══ Auto-mining — follows Last.fm playback ═══
-  // Music playing + not manually stopped → start mining.
-  // Music stopped while mining is active → auto-pause (keeps manualStop flag).
+  // 100% automatic: music plays → mining starts; music stops → mining pauses.
+  // No manual Start/Stop button.
   useEffect(() => {
     const isReadyNow = authState === 'ready' && !!storedKeys;
     if (!isReadyNow) return;
     if (!lastfmUser) return;
 
-    if (currentTrack && !manualStopRef.current && !miningActive) {
-      addLog('🎵 Music detected — auto-starting mining');
-      handleStartMining(false);
-    } else if (!currentTrack && miningActive && !manualStopRef.current) {
+    if (currentTrack && !miningActive) {
+      addLog(`🎵 Music playing — auto-starting mining`);
+      handleStartMining();
+    } else if (!currentTrack && miningActive) {
       addLog('🔇 No music — auto-pausing mining');
-      handleStopMining(false);
+      handleStopMining();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack, authState, storedKeys, lastfmUser]);
+
+  // ═══ Background keep-alive (register SW + log visibility changes) ═══
+  useEffect(() => {
+    void registerKeepAliveSw();
+    const handler = () => {
+      if (document.visibilityState === 'hidden') {
+        addLog('⚡ Tab hidden — mining continues via Web Worker + silent audio');
+      } else {
+        addLog('👁 Tab visible again');
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep-alive audio tracks mining state (redundant safety — handleStart/Stop
+  // already call these, but this guarantees consistency on unmount).
+  useEffect(() => {
+    if (miningActive) startSilentKeepAlive();
+    else stopSilentKeepAlive();
+  }, [miningActive]);
 
   // ═══ Wallet balance refresh ═══
   async function refreshBalance(address: string, silent = false) {
@@ -416,10 +430,7 @@ export default function App() {
   // ═══ Session-loop helpers ═══
 
   function stopTapLoop() {
-    if (tapTimerRef.current !== null) {
-      window.clearInterval(tapTimerRef.current);
-      tapTimerRef.current = null;
-    }
+    miningTimers.clear('tap');
   }
 
   function startTapLoop() {
@@ -431,7 +442,7 @@ export default function App() {
     tapsCountRef.current = 0;
     setTapsCount(0);
 
-    tapTimerRef.current = window.setInterval(() => {
+    miningTimers.setInterval('tap', TAP_INTERVAL_MS, () => {
       const c = tapCoordsRef.current;
       c.x = Math.max(20, Math.min(280, c.x + (Math.random() - 0.5) * 30));
       c.y = Math.max(20, Math.min(380, c.y + (Math.random() - 0.5) * 30));
@@ -442,37 +453,28 @@ export default function App() {
         setTapsCount(tapsCountRef.current);
         setTapPulseCounter((n) => n + 1);
       }
-    }, TAP_INTERVAL_MS);
+    });
   }
 
   function clearWatchdog() {
-    if (watchdogRef.current !== null) {
-      window.clearTimeout(watchdogRef.current);
-      watchdogRef.current = null;
-    }
+    miningTimers.clear('watchdog');
   }
 
   function clearCanStartTimer() {
-    if (canStartTimerRef.current !== null) {
-      window.clearTimeout(canStartTimerRef.current);
-      canStartTimerRef.current = null;
-    }
+    miningTimers.clear('canstart');
   }
 
   function stopRewardPoll() {
-    if (rewardPollRef.current !== null) {
-      window.clearInterval(rewardPollRef.current);
-      rewardPollRef.current = null;
-    }
+    miningTimers.clear('reward');
   }
 
   function startRewardPoll() {
     stopRewardPoll();
-    rewardPollRef.current = window.setInterval(() => {
+    miningTimers.setInterval('reward', REWARD_POLL_MS, () => {
       claimReward()
         .then((ok) => { if (ok) addLog('💰 get_reward() tick'); })
         .catch((e) => addLog(`✗ get_reward: ${e?.message ?? e}`));
-    }, REWARD_POLL_MS);
+    });
   }
 
   function clearAllMiningTimers() {
@@ -530,12 +532,12 @@ export default function App() {
     startTapLoop();
 
     // Safety watchdog — ignored if generation already advanced.
-    watchdogRef.current = window.setTimeout(() => {
+    miningTimers.setTimeout('watchdog', SESSION_WATCHDOG_MS, () => {
       if (sessionGenRef.current !== genAtStart) return;
       addLog(`⏱ Session ${sessionCountRef.current}: no end event within ${SESSION_WATCHDOG_MS / 1000}s — forcing cooldown-aware next`);
       stopTapLoop();
       scheduleEpochAwareNextSession();
-    }, SESSION_WATCHDOG_MS);
+    });
   }
 
   async function attemptReinit(): Promise<boolean> {
@@ -598,9 +600,9 @@ export default function App() {
       }
 
       const nextMs = isSlow ? CANSTART_SLOW_MS : CANSTART_POLL_MS;
-      canStartTimerRef.current = window.setTimeout(() => {
+      miningTimers.setTimeout('canstart', nextMs, () => {
         tick().catch((e) => addLog(`✗ poll tick error: ${e?.message ?? e}`));
-      }, nextMs);
+      });
     };
 
     tick().catch((e) => addLog(`✗ poll tick error: ${e?.message ?? e}`));
@@ -612,7 +614,7 @@ export default function App() {
     clearWatchdog();
     clearCanStartTimer();
     if (delayMs > 0) {
-      canStartTimerRef.current = window.setTimeout(pollCanStartThenStart, delayMs);
+      miningTimers.setTimeout('canstart', delayMs, pollCanStartThenStart);
     } else {
       pollCanStartThenStart();
     }
@@ -747,15 +749,10 @@ export default function App() {
     }
   }
 
-  // `manual=true` means user explicitly pressed Start/Stop. Auto-mining (music
-  // driven) calls these with manual=false so they don't override the user's
-  // last explicit choice.
-  function handleStartMining(manual = true) {
+  // Auto-mining ONLY. No manual Start/Stop — the useEffect watching
+  // currentTrack calls these directly.
+  function handleStartMining() {
     if (miningActive) return;
-    if (manual) {
-      manualStopRef.current = false;
-      setAutoMode(true);
-    }
     addLog(`▶ Mining started: ${SESSION_DURATION_MS / 1000}s sessions back-to-back (~${Math.round(SESSION_DURATION_MS / TAP_INTERVAL_MS)} taps each), reward poll every ${REWARD_POLL_MS / 1000}s.`);
     shouldAutoRestartRef.current = true;
     sessionCountRef.current = 0;
@@ -765,22 +762,18 @@ export default function App() {
     setSessionCount(0);
     setMiningActive(true);
     setSessionStart(Date.now());
+    startSilentKeepAlive();
     startRewardPoll();
     startNextSession();
   }
 
-  function handleStopMining(manual = true) {
+  function handleStopMining() {
     shouldAutoRestartRef.current = false;
     clearAllMiningTimers();
     stopMining();
+    stopSilentKeepAlive();
     setMiningActive(false);
-    if (manual) {
-      manualStopRef.current = true;
-      setAutoMode(false);
-      addLog(`⏹ Manually stopped. Sessions: ${sessionCountRef.current}, taps in last session: ${tapsCountRef.current}`);
-    } else {
-      addLog(`⏸ Auto-paused (music stopped). Sessions: ${sessionCountRef.current}`);
-    }
+    addLog(`⏸ Auto-paused (music stopped). Sessions: ${sessionCountRef.current}`);
   }
 
   // ═══ Debug runner — fetches on-chain state for the miner contract ═══
@@ -1379,51 +1372,36 @@ export default function App() {
         )}
       </div>
 
-      {/* ═══ MINING CONTROL CARD ═══ */}
+      {/* ═══ MINING STATUS CARD (fully automatic) ═══ */}
       {isReady && lastfmUser && (
         <div className={`card ${miningActive ? 'card--mining' : ''}`}>
           <div className="card__label">{t(lang, 'miningStatus')}</div>
 
-          {/* Auto / waiting / manual mode indicator */}
-          {(() => {
-            const mode = !autoMode
-              ? { cls: 'mine-mode--manual', text: '🛑 Manually stopped — mining won\'t auto-resume until you press Start' }
+          {/* Auto / waiting mode indicator */}
+          <div
+            className={`mine-mode ${miningActive ? 'mine-mode--active' : 'mine-mode--waiting'}`}
+            style={{ marginBottom: 10 }}
+          >
+            <span className="mine-mode__dot" />
+            {miningActive && currentTrack
+              ? `🎵 Mining active — ${currentTrack.title} · ${currentTrack.artist}`
               : miningActive
-                ? { cls: 'mine-mode--active', text: '🎵 Auto-mining — follows the music' }
-                : { cls: 'mine-mode--waiting', text: '⏸ Waiting for music…' };
-            return (
-              <div className={`mine-mode ${mode.cls}`} style={{ marginBottom: 10 }}>
-                <span className="mine-mode__dot" />
-                {mode.text}
-              </div>
-            );
-          })()}
+                ? '🎵 Mining active'
+                : '⏸ Waiting for music…'}
+          </div>
 
-          <div className="mining-status">
-            <span className={`badge ${miningActive ? 'badge--success' : 'badge--idle'}`}>
-              {miningActive ? `▶ ${t(lang, 'mining')}` : `⏸ ${t(lang, 'notMining')}`}
-            </span>
-            {miningActive && (
+          {miningActive && (
+            <div className="mining-status">
+              <span className="badge badge--success">▶ {t(lang, 'mining')}</span>
               <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
                 Session <strong>#{sessionCount}</strong> · {t(lang, 'sessionTaps')}: <strong>{tapsCount}</strong>
               </span>
-            )}
-          </div>
+            </div>
+          )}
 
-          <div style={{ marginTop: 12 }}>
-            {!miningActive ? (
-              <button className="btn btn--primary btn--full" onClick={() => handleStartMining(true)}>
-                {autoMode ? t(lang, 'startMining') : `${t(lang, 'startMining')} (resume auto-mode)`}
-              </button>
-            ) : (
-              <button className="btn btn--full" onClick={() => handleStopMining(true)}>
-                {t(lang, 'stopMining')}
-              </button>
-            )}
-          </div>
           <div className="mining-info">
-            ℹ️ Mining follows your Last.fm playback. Stop the button to override manually.
-            Rewards are collected automatically and land in your wallet after sessions settle on-chain.
+            ℹ️ Mining is fully automatic — it starts when Last.fm detects music and pauses when the music stops.
+            Rewards land in your wallet after sessions settle on-chain. Keep this tab open for best results.
           </div>
         </div>
       )}
