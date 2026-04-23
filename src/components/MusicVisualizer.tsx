@@ -16,7 +16,7 @@ import { useEffect, useRef, useState } from 'react';
  *                  centred burst of ~25 particles in all directions.
  */
 const MASCOT_COUNT = 9;
-const MASCOT_SRCS = Array.from({ length: MASCOT_COUNT }, (_, i) => `/mascot/sprite${i + 1}.png`);
+const MASCOT_SRCS = Array.from({ length: MASCOT_COUNT }, (_, i) => `${import.meta.env.BASE_URL}mascot/sprite${i + 1}.png`);
 
 export function MusicVisualizer({
   playing,
