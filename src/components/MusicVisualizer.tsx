@@ -31,7 +31,7 @@ export function MusicVisualizer({
 
   // Mascot state
   const [mascotReady, setMascotReady] = useState(false);
-  const [poseIndex, setPoseIndex] = useState(0);
+  const [spriteIndex, setspriteIndex] = useState(0);
   const [bounce, setBounce] = useState(false);
   const burstUntilRef = useRef(0);
   const lastTapForMascot = useRef(tapPulse);
@@ -59,18 +59,18 @@ export function MusicVisualizer({
     return () => { cancelled = true; };
   }, []);
 
-  // Pose cycling: normal 450ms, burst 200ms for 2s after a track change.
-  // Paused → stay on pose 0.
+  // sprite cycling: normal 450ms, burst 200ms for 2s after a track change.
+  // Paused → stay on sprite 0.
   useEffect(() => {
     if (!mascotReady) return;
     if (!playing) {
-      setPoseIndex(0);
+      setspriteIndex(0);
       return;
     }
     let cancelled = false;
     const tick = () => {
       if (cancelled) return;
-      setPoseIndex((p) => (p + 1) % MASCOT_COUNT);
+      setspriteIndex((p) => (p + 1) % MASCOT_COUNT);
       const bursting = Date.now() < burstUntilRef.current;
       const delay = bursting ? 200 : 450;
       timer = window.setTimeout(tick, delay);
@@ -99,7 +99,7 @@ export function MusicVisualizer({
     stateRef.current.playing = playing;
   }, [playing]);
 
-  // Tap pulse → flash + 3 bright sparks + instant pose swap + bounce
+  // Tap pulse → flash + 3 bright sparks + instant sprite swap + bounce
   useEffect(() => {
     const s = stateRef.current;
     if (tapPulse === s.lastTap) return;
@@ -128,10 +128,10 @@ export function MusicVisualizer({
       });
     }
 
-    // Mascot reaction: instant pose swap + 200ms bounce
+    // Mascot reaction: instant sprite swap + 200ms bounce
     if (tapPulse !== lastTapForMascot.current) {
       lastTapForMascot.current = tapPulse;
-      setPoseIndex((p) => (p + 1) % MASCOT_COUNT);
+      setspriteIndex((p) => (p + 1) % MASCOT_COUNT);
       setBounce(true);
       if (bounceTimerRef.current) window.clearTimeout(bounceTimerRef.current);
       bounceTimerRef.current = window.setTimeout(() => setBounce(false), 200);
@@ -335,7 +335,7 @@ export function MusicVisualizer({
           className={`viz-mascot ${playing ? 'viz-mascot--on' : 'viz-mascot--off'} ${bounce ? 'viz-mascot--bounce' : ''}`}
           aria-hidden="true"
         >
-          <img src={MASCOT_SRCS[poseIndex]} alt="" draggable={false} />
+          <img src={MASCOT_SRCS[spriteIndex]} alt="" draggable={false} />
         </div>
       )}
     </div>
