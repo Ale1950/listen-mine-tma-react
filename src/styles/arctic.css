@@ -885,6 +885,54 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   aspect-ratio: 560 / 260;
 }
 
+/* Dancing mascot overlay (bottom-center of visualizer) */
+.viz-mascot {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 110px;
+  height: 110px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 2;
+  animation: viz-mascot-sway 1s ease-in-out infinite alternate;
+  transition: filter 0.3s ease;
+  will-change: transform, filter;
+}
+.viz-mascot img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  transform-origin: 50% 100%;
+  transition: transform 0.18s ease-out;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.55));
+}
+.viz-mascot--on {
+  animation: viz-mascot-sway 1s ease-in-out infinite alternate,
+             viz-mascot-glow 1.2s ease-in-out infinite;
+}
+.viz-mascot--off img {
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.4)) saturate(0.7) brightness(0.85);
+}
+.viz-mascot--bounce img {
+  transform: scale(1.1);
+}
+@keyframes viz-mascot-sway {
+  from { transform: translateX(calc(-50% - 5px)); }
+  to   { transform: translateX(calc(-50% + 5px)); }
+}
+@keyframes viz-mascot-glow {
+  0%, 100% {
+    filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.55))
+            drop-shadow(0 0 8px rgba(56, 225, 255, 0.35));
+  }
+  50% {
+    filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.55))
+            drop-shadow(0 0 18px rgba(255, 42, 138, 0.55));
+  }
+}
+
 /* Legacy layered-rings visualiser (kept temporarily as a harmless fallback). */
 .viz {
   position: relative;

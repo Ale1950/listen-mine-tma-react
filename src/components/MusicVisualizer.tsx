@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * Canvas-based "cosmic pulse" visualiser.
@@ -15,6 +15,9 @@ import { useEffect, useRef } from 'react';
  *   - trackChange: monotonically-increasing counter. Each bump emits a
  *                  centred burst of ~25 particles in all directions.
  */
+const MASCOT_COUNT = 9;
+const MASCOT_SRCS = Array.from({ length: MASCOT_COUNT }, (_, i) => `/mascot/sprite${i + 1}.png`);
+
 export function MusicVisualizer({
   playing,
   tapPulse,
@@ -25,6 +28,59 @@ export function MusicVisualizer({
   trackChange: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Mascot state
+  const [mascotReady, setMascotReady] = useState(false);
+  const [poseIndex, setPoseIndex] = useState(0);
+  const [bounce, setBounce] = useState(false);
+  const burstUntilRef = useRef(0);
+  const lastTapForMascot = useRef(tapPulse);
+  const lastTrackForMascot = useRef(trackChange);
+  const bounceTimerRef = useRef<number | null>(null);
+
+  // Preload all 9 mascot images at startup. If any fails, hide mascot entirely.
+  useEffect(() => {
+    let cancelled = false;
+    let loaded = 0;
+    let failed = false;
+    for (const src of MASCOT_SRCS) {
+      const img = new Image();
+      img.onload = () => {
+        if (cancelled || failed) return;
+        loaded += 1;
+        if (loaded === MASCOT_COUNT) setMascotReady(true);
+      };
+      img.onerror = () => {
+        failed = true;
+        if (!cancelled) setMascotReady(false);
+      };
+      img.src = src;
+    }
+    return () => { cancelled = true; };
+  }, []);
+
+  // Pose cycling: normal 450ms, burst 200ms for 2s after a track change.
+  // Paused → stay on pose 0.
+  useEffect(() => {
+    if (!mascotReady) return;
+    if (!playing) {
+      setPoseIndex(0);
+      return;
+    }
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      setPoseIndex((p) => (p + 1) % MASCOT_COUNT);
+      const bursting = Date.now() < burstUntilRef.current;
+      const delay = bursting ? 200 : 450;
+      timer = window.setTimeout(tick, delay);
+    };
+    let timer = window.setTimeout(tick, 450);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [playing, mascotReady]);
 
   // Mutable state that outlives re-renders. Kept out of React state to avoid
   // re-rendering 60 times per second.
@@ -43,7 +99,7 @@ export function MusicVisualizer({
     stateRef.current.playing = playing;
   }, [playing]);
 
-  // Tap pulse → flash + 3 bright sparks
+  // Tap pulse → flash + 3 bright sparks + instant pose swap + bounce
   useEffect(() => {
     const s = stateRef.current;
     if (tapPulse === s.lastTap) return;
@@ -71,9 +127,18 @@ export function MusicVisualizer({
         glow: 5,
       });
     }
+
+    // Mascot reaction: instant pose swap + 200ms bounce
+    if (tapPulse !== lastTapForMascot.current) {
+      lastTapForMascot.current = tapPulse;
+      setPoseIndex((p) => (p + 1) % MASCOT_COUNT);
+      setBounce(true);
+      if (bounceTimerRef.current) window.clearTimeout(bounceTimerRef.current);
+      bounceTimerRef.current = window.setTimeout(() => setBounce(false), 200);
+    }
   }, [tapPulse]);
 
-  // Track change → full-circle burst
+  // Track change → full-circle burst + mascot burst-mode for 2s
   useEffect(() => {
     const s = stateRef.current;
     if (trackChange === s.lastTrack) return;
@@ -101,7 +166,19 @@ export function MusicVisualizer({
         glow: 4.5,
       });
     }
+
+    if (trackChange !== lastTrackForMascot.current) {
+      lastTrackForMascot.current = trackChange;
+      burstUntilRef.current = Date.now() + 2000;
+    }
   }, [trackChange]);
+
+  // Cleanup bounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (bounceTimerRef.current) window.clearTimeout(bounceTimerRef.current);
+    };
+  }, []);
 
   // Main render loop
   useEffect(() => {
@@ -253,6 +330,14 @@ export function MusicVisualizer({
   return (
     <div className={`viz-wrap ${playing ? 'viz-wrap--on' : 'viz-wrap--off'}`}>
       <canvas ref={canvasRef} className="viz-canvas" />
+      {mascotReady && (
+        <div
+          className={`viz-mascot ${playing ? 'viz-mascot--on' : 'viz-mascot--off'} ${bounce ? 'viz-mascot--bounce' : ''}`}
+          aria-hidden="true"
+        >
+          <img src={MASCOT_SRCS[poseIndex]} alt="" draggable={false} />
+        </div>
+      )}
     </div>
   );
 }
