@@ -964,8 +964,13 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   animation: viz-spot-swing-1 2.6s ease-in-out infinite alternate,
              viz-spot-color-1 6s linear infinite;
 }
+/* Right-side beam: mirrored source, clip-path and swing angles */
 .viz-spotlight--2 {
-  top: 50%;
+  top: 45%;
+  left: auto;
+  right: 0;
+  transform-origin: 100% 50%;
+  clip-path: polygon(100% 45%, 100% 55%, 0 0, 0 100%);
   animation: viz-spot-swing-2 2.2s ease-in-out infinite alternate,
              viz-spot-color-2 6s linear infinite;
 }
@@ -973,9 +978,10 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   from { transform: rotate(22deg); }
   to   { transform: rotate(42deg); }
 }
+/* Mirrored sweep: rotates the other way so the cone points down-left */
 @keyframes viz-spot-swing-2 {
-  from { transform: rotate(38deg); }
-  to   { transform: rotate(58deg); }
+  from { transform: rotate(-38deg); }
+  to   { transform: rotate(-58deg); }
 }
 @keyframes viz-spot-color-1 {
   0%   { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
@@ -986,14 +992,84 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   83%  { background: linear-gradient(to right, rgba(255, 90, 180, 0.75), rgba(255, 90, 180, 0)); }
   100% { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
 }
+/* Beam 2 fades from right edge → left edge (source is on the right). */
 @keyframes viz-spot-color-2 {
-  0%   { background: linear-gradient(to right, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
-  16%  { background: linear-gradient(to right, rgba(60, 255, 120, 0.75), rgba(60, 255, 120, 0)); }
-  33%  { background: linear-gradient(to right, rgba(255, 90, 180, 0.75), rgba(255, 90, 180, 0)); }
-  50%  { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
-  66%  { background: linear-gradient(to right, rgba(80, 120, 255, 0.75), rgba(80, 120, 255, 0)); }
-  83%  { background: linear-gradient(to right, rgba(200, 80, 255, 0.75), rgba(200, 80, 255, 0)); }
-  100% { background: linear-gradient(to right, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
+  0%   { background: linear-gradient(to left, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
+  16%  { background: linear-gradient(to left, rgba(60, 255, 120, 0.75), rgba(60, 255, 120, 0)); }
+  33%  { background: linear-gradient(to left, rgba(255, 90, 180, 0.75), rgba(255, 90, 180, 0)); }
+  50%  { background: linear-gradient(to left, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
+  66%  { background: linear-gradient(to left, rgba(80, 120, 255, 0.75), rgba(80, 120, 255, 0)); }
+  83%  { background: linear-gradient(to left, rgba(200, 80, 255, 0.75), rgba(200, 80, 255, 0)); }
+  100% { background: linear-gradient(to left, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
+}
+
+/* Disco mirror balls — above-left (big) and above-right (small) of dancer.
+   Silver sphere via radial gradient, facets via repeating conic, all rotating.
+   The ::after layer holds orbiting reflected light dots. */
+.viz-mirror-ball {
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+  transition: opacity 0.6s ease;
+}
+.viz-mirror-ball::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(from 0deg,
+      rgba(255, 255, 255, 0.38) 0deg 8deg,
+      rgba(40, 55, 75, 0.38) 8deg 16deg),
+    radial-gradient(circle at 32% 28%,
+      #ffffff 0%, #d8dee6 20%, #7c8794 55%, #2a323c 100%);
+  background-blend-mode: overlay, normal;
+  box-shadow:
+    inset -4px -4px 8px rgba(0, 0, 0, 0.55),
+    inset 2px 2px 5px rgba(255, 255, 255, 0.35),
+    0 0 10px rgba(200, 220, 255, 0.35);
+}
+.viz-mirror-ball::after {
+  content: '';
+  position: absolute;
+  inset: -24px;
+  pointer-events: none;
+  background:
+    radial-gradient(2px 2px at 18% 28%, rgba(255, 255, 210, 0.9), rgba(255, 255, 210, 0) 70%),
+    radial-gradient(2px 2px at 82% 42%, rgba(190, 255, 255, 0.85), rgba(190, 255, 255, 0) 70%),
+    radial-gradient(2px 2px at 48% 88%, rgba(255, 200, 255, 0.85), rgba(255, 200, 255, 0) 70%),
+    radial-gradient(2px 2px at 10% 70%, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0) 70%);
+}
+.viz-mirror-ball--big {
+  top: 28%;
+  left: 28px;
+  width: 32px;
+  height: 32px;
+}
+.viz-mirror-ball--small {
+  top: 18%;
+  left: 98px;
+  width: 20px;
+  height: 20px;
+}
+.viz-mirror-ball--big::before  { animation: viz-mball-spin 8s linear infinite; }
+.viz-mirror-ball--small::before { animation: viz-mball-spin 5s linear infinite; }
+.viz-mirror-ball--big::after   { animation: viz-mball-dots 6s linear infinite; }
+.viz-mirror-ball--small::after { animation: viz-mball-dots 4s linear infinite reverse; }
+.viz-mirror-ball--off {
+  opacity: 0.55;
+}
+.viz-mirror-ball--off::before,
+.viz-mirror-ball--off::after {
+  animation-play-state: paused;
+}
+@keyframes viz-mball-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes viz-mball-dots {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
 }
 
 /* Legacy layered-rings visualiser (kept temporarily as a harmless fallback). */

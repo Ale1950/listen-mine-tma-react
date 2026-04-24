@@ -15,7 +15,15 @@ import { useEffect, useRef, useState } from 'react';
 
 const GROUP_COUNT = 3;
 const POSES_PER_GROUP = 9;
-const POSE_INTERVAL_MS = 150;
+
+// Pose timing: taps drive the beat. When they stop, we fall back to a steady
+// rhythm. After a track change, we briefly speed up to celebrate the switch.
+const FALLBACK_INTERVAL_MS = 400;
+const BURST_INTERVAL_MS = 150;
+const BURST_DURATION_MS = 2000;
+// If the last tap was this long ago we assume mining is idle and drive the
+// pose ourselves on FALLBACK_INTERVAL_MS.
+const TAP_STALE_MS = 2500;
 
 // Honour Vite's BASE_URL so paths resolve correctly when the app is mounted
 // under a non-root prefix (e.g. Vercel preview subpaths).
@@ -45,6 +53,8 @@ export function MusicVisualizer({
   const [spotFlash, setSpotFlash] = useState(false);
   const lastTapForMascot = useRef(tapPulse);
   const lastTrackForMascot = useRef(trackChange);
+  const lastTapTimeRef = useRef(0);
+  const burstUntilRef = useRef(0);
   const bounceTimerRef = useRef<number | null>(null);
   const spotFlashTimerRef = useRef<number | null>(null);
 
@@ -76,7 +86,11 @@ export function MusicVisualizer({
     };
   }, []);
 
-  // Pose cycling: 150 ms always. Paused → freeze on pose 1 of current group.
+  // Pose cycling driven by the tap_computed heartbeat:
+  //   - In burst (2 s after trackChange): auto-advance every 150 ms.
+  //   - Recent taps (<2.5 s): taps drive the pose; timer only polls, no advance.
+  //   - No recent taps (idle mining but music playing): fallback 400 ms auto-advance.
+  // Paused → freeze on pose 0 of current group.
   useEffect(() => {
     if (validGroups.length === 0) return;
     if (!playing) {
@@ -87,10 +101,24 @@ export function MusicVisualizer({
     let timer: number;
     const tick = () => {
       if (cancelled) return;
-      setPoseIndex((p) => (p + 1) % POSES_PER_GROUP);
-      timer = window.setTimeout(tick, POSE_INTERVAL_MS);
+      const now = Date.now();
+      const inBurst = now < burstUntilRef.current;
+      const tapRecent = now - lastTapTimeRef.current < TAP_STALE_MS;
+
+      let delay: number;
+      if (inBurst) {
+        setPoseIndex((p) => (p + 1) % POSES_PER_GROUP);
+        delay = BURST_INTERVAL_MS;
+      } else if (tapRecent) {
+        // Taps drive pose changes via the tap handler. Just re-poll.
+        delay = 250;
+      } else {
+        setPoseIndex((p) => (p + 1) % POSES_PER_GROUP);
+        delay = FALLBACK_INTERVAL_MS;
+      }
+      timer = window.setTimeout(tick, delay);
     };
-    timer = window.setTimeout(tick, POSE_INTERVAL_MS);
+    timer = window.setTimeout(tick, 100);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
@@ -143,9 +171,11 @@ export function MusicVisualizer({
       });
     }
 
-    // Mascot reaction: instant pose swap + 200ms bounce
+    // Mascot reaction: instant pose swap + 200ms bounce. Also stamp lastTapTime
+    // so the fallback cycler knows taps are actively driving the beat.
     if (tapPulse !== lastTapForMascot.current) {
       lastTapForMascot.current = tapPulse;
+      lastTapTimeRef.current = Date.now();
       setPoseIndex((p) => (p + 1) % POSES_PER_GROUP);
       setBounce(true);
       if (bounceTimerRef.current) window.clearTimeout(bounceTimerRef.current);
@@ -192,6 +222,8 @@ export function MusicVisualizer({
       lastTrackForMascot.current = trackChange;
       setGroupSlot((slot) => slot + 1);
       setPoseIndex(0);
+      // Trigger burst mode: 150ms pose cycling for BURST_DURATION_MS
+      burstUntilRef.current = Date.now() + BURST_DURATION_MS;
     }
   }, [trackChange]);
 
@@ -350,13 +382,25 @@ export function MusicVisualizer({
     <div className={`viz-wrap ${playing ? 'viz-wrap--on' : 'viz-wrap--off'}`}>
       <canvas ref={canvasRef} className="viz-canvas" />
 
-      {/* 80s disco spotlights — two beams, phase-shifted colours, swinging */}
+      {/* 80s disco spotlights — left beam + right beam (mirrored), phase-shifted
+          colours, swinging. They cross roughly on the dancer. */}
       <div
         className={`viz-spotlight viz-spotlight--1 ${playing ? 'on' : 'off'} ${spotFlash ? 'flash' : ''}`}
         aria-hidden="true"
       />
       <div
         className={`viz-spotlight viz-spotlight--2 ${playing ? 'on' : 'off'} ${spotFlash ? 'flash' : ''}`}
+        aria-hidden="true"
+      />
+
+      {/* Mirror balls — bigger one above-left of dancer, smaller one above-right
+          and slightly higher. Pure-CSS facets + orbiting light dots via pseudos. */}
+      <div
+        className={`viz-mirror-ball viz-mirror-ball--big ${playing ? 'viz-mirror-ball--on' : 'viz-mirror-ball--off'}`}
+        aria-hidden="true"
+      />
+      <div
+        className={`viz-mirror-ball viz-mirror-ball--small ${playing ? 'viz-mirror-ball--on' : 'viz-mirror-ball--off'}`}
         aria-hidden="true"
       />
 
