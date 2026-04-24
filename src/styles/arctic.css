@@ -960,15 +960,17 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   opacity: 1;
 }
 .viz-spotlight--1 {
-  top: 30%;
+  top: 28%;
   animation: viz-spot-swing-1 2.6s ease-in-out infinite alternate,
              viz-spot-color-1 6s linear infinite;
 }
-/* Right-side beam: mirrored source, clip-path and swing angles */
+/* Right-side beam: source at ~60% from the left (just left of the central
+   nebula), same height as beam 1, mirrored clip-path + swing so the cone
+   points down-left toward the dancer. */
 .viz-spotlight--2 {
-  top: 45%;
+  top: 28%;
   left: auto;
-  right: 0;
+  right: 40%;
   transform-origin: 100% 50%;
   clip-path: polygon(100% 45%, 100% 55%, 0 0, 0 100%);
   animation: viz-spot-swing-2 2.2s ease-in-out infinite alternate,
@@ -978,10 +980,10 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   from { transform: rotate(22deg); }
   to   { transform: rotate(42deg); }
 }
-/* Mirrored sweep: rotates the other way so the cone points down-left */
+/* Positive rotation on a left-pointing cone swings the tip downward. */
 @keyframes viz-spot-swing-2 {
-  from { transform: rotate(-38deg); }
-  to   { transform: rotate(-58deg); }
+  from { transform: rotate(20deg); }
+  to   { transform: rotate(40deg); }
 }
 @keyframes viz-spot-color-1 {
   0%   { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
@@ -1003,73 +1005,98 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   100% { background: linear-gradient(to left, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
 }
 
-/* Disco mirror balls — above-left (big) and above-right (small) of dancer.
-   Silver sphere via radial gradient, facets via repeating conic, all rotating.
-   The ::after layer holds orbiting reflected light dots. */
+/* Disco mirror balls — chrome sphere with a visible facet grid, rotating
+   around the Y axis (horizontally) like a real mirror ball hung from a
+   ceiling. Perspective on the container gives the 3D feel. A separate
+   ::after highlight glides across the surface to fake the travelling
+   reflection. */
 .viz-mirror-ball {
   position: absolute;
   pointer-events: none;
   z-index: 4;
+  perspective: 200px;
   transition: opacity 0.6s ease;
 }
+/* The sphere itself — silver gradient + small square facets via two
+   perpendicular grids. rotateY on this pseudo gives horizontal spin. */
 .viz-mirror-ball::before {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: 50%;
   background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.22) 1px, transparent 1px),
+    linear-gradient(0deg,  rgba(0, 0, 0, 0.35) 1px, transparent 1px),
     repeating-conic-gradient(from 0deg,
-      rgba(255, 255, 255, 0.38) 0deg 8deg,
-      rgba(40, 55, 75, 0.38) 8deg 16deg),
-    radial-gradient(circle at 32% 28%,
-      #ffffff 0%, #d8dee6 20%, #7c8794 55%, #2a323c 100%);
-  background-blend-mode: overlay, normal;
+      rgba(220, 230, 240, 0.18) 0deg 6deg,
+      rgba(30, 40, 55, 0.22) 6deg 12deg),
+    radial-gradient(circle at 35% 28%,
+      #ffffff 0%, #d0d8e0 15%, #8a94a0 40%, #4c5661 70%, #161c24 100%);
+  background-size: 4px 4px, 4px 4px, 100% 100%, 100% 100%;
+  background-repeat: repeat, repeat, no-repeat, no-repeat;
+  background-blend-mode: screen, multiply, overlay, normal;
   box-shadow:
-    inset -4px -4px 8px rgba(0, 0, 0, 0.55),
-    inset 2px 2px 5px rgba(255, 255, 255, 0.35),
-    0 0 10px rgba(200, 220, 255, 0.35);
+    inset -4px -5px 9px rgba(0, 0, 0, 0.65),
+    inset 2px 2px 5px rgba(255, 255, 255, 0.4),
+    0 0 14px rgba(180, 210, 250, 0.35);
+  transform-style: preserve-3d;
+  backface-visibility: visible;
 }
+/* Travelling specular highlight — small oval light that drifts across the
+   sphere while the facets spin. Independent pseudo so it can animate
+   separately from the sphere's rotation. */
 .viz-mirror-ball::after {
   content: '';
   position: absolute;
-  inset: -24px;
+  width: 32%;
+  height: 26%;
+  top: 14%;
+  left: 22%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(255, 255, 255, 0.45) 35%,
+    rgba(255, 255, 255, 0) 75%);
+  filter: blur(1px);
   pointer-events: none;
-  background:
-    radial-gradient(2px 2px at 18% 28%, rgba(255, 255, 210, 0.9), rgba(255, 255, 210, 0) 70%),
-    radial-gradient(2px 2px at 82% 42%, rgba(190, 255, 255, 0.85), rgba(190, 255, 255, 0) 70%),
-    radial-gradient(2px 2px at 48% 88%, rgba(255, 200, 255, 0.85), rgba(255, 200, 255, 0) 70%),
-    radial-gradient(2px 2px at 10% 70%, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0) 70%);
 }
 .viz-mirror-ball--big {
-  top: 28%;
-  left: 28px;
-  width: 32px;
-  height: 32px;
+  top: 26%;
+  left: 30px;
+  width: 35px;
+  height: 35px;
 }
 .viz-mirror-ball--small {
-  top: 18%;
-  left: 98px;
+  top: 16%;
+  left: 100px;
   width: 20px;
   height: 20px;
 }
-.viz-mirror-ball--big::before  { animation: viz-mball-spin 8s linear infinite; }
-.viz-mirror-ball--small::before { animation: viz-mball-spin 5s linear infinite; }
-.viz-mirror-ball--big::after   { animation: viz-mball-dots 6s linear infinite; }
-.viz-mirror-ball--small::after { animation: viz-mball-dots 4s linear infinite reverse; }
+.viz-mirror-ball--big::before   { animation: viz-mball-spin-y 8s linear infinite; }
+.viz-mirror-ball--small::before { animation: viz-mball-spin-y 5s linear infinite reverse; }
+.viz-mirror-ball--big::after    { animation: viz-mball-shine 4.5s ease-in-out infinite; }
+.viz-mirror-ball--small::after  { animation: viz-mball-shine 3.2s ease-in-out infinite reverse; }
+
 .viz-mirror-ball--off {
-  opacity: 0.55;
+  opacity: 0.75;
 }
 .viz-mirror-ball--off::before,
 .viz-mirror-ball--off::after {
   animation-play-state: paused;
 }
-@keyframes viz-mball-spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+
+@keyframes viz-mball-spin-y {
+  from { transform: rotateY(0deg); }
+  to   { transform: rotateY(360deg); }
 }
-@keyframes viz-mball-dots {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(-360deg); }
+/* Shine drifts across upper half of the sphere and fades briefly mid-cycle
+   to suggest the highlight wrapping round the far side. */
+@keyframes viz-mball-shine {
+  0%   { top: 14%; left: 18%; opacity: 0.95; }
+  35%  { top: 20%; left: 58%; opacity: 0.8; }
+  50%  { top: 28%; left: 68%; opacity: 0.15; }
+  65%  { top: 36%; left: 40%; opacity: 0.55; }
+  100% { top: 14%; left: 18%; opacity: 0.95; }
 }
 
 /* Legacy layered-rings visualiser (kept temporarily as a harmless fallback). */
