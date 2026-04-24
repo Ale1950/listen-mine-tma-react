@@ -892,6 +892,8 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   bottom: 5px;
   width: 110px;
   height: 110px;
+  background: none !important;
+  background-color: transparent !important;
   pointer-events: none;
   z-index: 2;
   animation: viz-mascot-sway 1s ease-in-out infinite alternate;
@@ -903,6 +905,8 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   height: 100%;
   object-fit: contain;
   display: block;
+  background: none !important;
+  background-color: transparent !important;
   transform-origin: 50% 100%;
   transition: transform 0.18s ease-out;
   filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.55));
