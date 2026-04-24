@@ -364,9 +364,8 @@ export function MusicVisualizer({
         <div
           className={`viz-mascot ${playing ? 'viz-mascot--on' : 'viz-mascot--off'} ${bounce ? 'viz-mascot--bounce' : ''}`}
           aria-hidden="true"
-          style={{ background: 'none', backgroundColor: 'transparent' }}
         >
-          <img src={mascotSrc} alt="" draggable={false} style={{ background: 'none', backgroundColor: 'transparent' }} />
+          <img src={mascotSrc} alt="" draggable={false} />
         </div>
       )}
     </div>
