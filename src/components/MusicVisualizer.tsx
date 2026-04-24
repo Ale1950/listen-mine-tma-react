@@ -1,22 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 
 /**
- * Canvas-based "cosmic pulse" visualiser.
- *
- * A glowing nebula core surrounded by ~90 particles that stream in toward
- * the centre with a slight tangential swirl. Pure canvas + requestAnimation
- * Frame, no libraries. Pauses gently when the music stops.
+ * Canvas-based "cosmic pulse" visualiser + dancing mascot + 80s disco spotlights.
  *
  * Props:
- *   - playing:     true while Last.fm reports a live track. Controls spawn
- *                  rate, pull strength, and core brightness.
+ *   - playing:     true while Last.fm reports a live track.
  *   - tapPulse:    monotonically-increasing counter. Each bump emits a
- *                  short flash + 3 bright spark particles.
+ *                  short flash + 3 bright spark particles, swaps mascot pose,
+ *                  and intensifies the spotlights for 200 ms.
  *   - trackChange: monotonically-increasing counter. Each bump emits a
- *                  centred burst of ~25 particles in all directions.
+ *                  centred burst of particles AND rotates the mascot to the
+ *                  next valid group (1 → 2 → 3 → 1).
  */
-const MASCOT_COUNT = 9;
-const MASCOT_SRCS = Array.from({ length: MASCOT_COUNT }, (_, i) => `${import.meta.env.BASE_URL}mascot/sprite${i + 1}.png`);
+
+const GROUP_COUNT = 3;
+const POSES_PER_GROUP = 9;
+const POSE_INTERVAL_MS = 150;
+
+// Honour Vite's BASE_URL so paths resolve correctly when the app is mounted
+// under a non-root prefix (e.g. Vercel preview subpaths).
+const MASCOT_SRCS: string[][] = Array.from({ length: GROUP_COUNT }, (_, g) =>
+  Array.from(
+    { length: POSES_PER_GROUP },
+    (_, p) => `${import.meta.env.BASE_URL}mascot/group${g + 1}_${p + 1}.png`,
+  ),
+);
 
 export function MusicVisualizer({
   playing,
@@ -30,57 +38,64 @@ export function MusicVisualizer({
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Mascot state
-  const [mascotReady, setMascotReady] = useState(false);
-  const [spriteIndex, setspriteIndex] = useState(0);
+  const [validGroups, setValidGroups] = useState<number[]>([]);
+  const [poseIndex, setPoseIndex] = useState(0);
+  const [groupSlot, setGroupSlot] = useState(0);
   const [bounce, setBounce] = useState(false);
-  const burstUntilRef = useRef(0);
+  const [spotFlash, setSpotFlash] = useState(false);
   const lastTapForMascot = useRef(tapPulse);
   const lastTrackForMascot = useRef(trackChange);
   const bounceTimerRef = useRef<number | null>(null);
+  const spotFlashTimerRef = useRef<number | null>(null);
 
-  // Preload all 9 mascot images at startup. If any fails, hide mascot entirely.
+  // Preload all 27 mascot images at startup. Group is considered "valid" only
+  // when all 9 poses in it load successfully. If no group is fully valid, the
+  // mascot stays hidden (fallback).
   useEffect(() => {
     let cancelled = false;
-    let loaded = 0;
-    let failed = false;
-    for (const src of MASCOT_SRCS) {
-      const img = new Image();
-      img.onload = () => {
-        if (cancelled || failed) return;
-        loaded += 1;
-        if (loaded === MASCOT_COUNT) setMascotReady(true);
-      };
-      img.onerror = () => {
-        failed = true;
-        if (!cancelled) setMascotReady(false);
-      };
-      img.src = src;
-    }
-    return () => { cancelled = true; };
+    const loaded = Array.from({ length: GROUP_COUNT }, () => 0);
+    const failed = Array.from({ length: GROUP_COUNT }, () => false);
+    MASCOT_SRCS.forEach((srcs, gi) => {
+      srcs.forEach((src) => {
+        const img = new Image();
+        img.onload = () => {
+          if (cancelled || failed[gi]) return;
+          loaded[gi] += 1;
+          if (loaded[gi] === POSES_PER_GROUP) {
+            setValidGroups((prev) => (prev.includes(gi) ? prev : [...prev, gi].sort()));
+          }
+        };
+        img.onerror = () => {
+          failed[gi] = true;
+        };
+        img.src = src;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // sprite cycling: normal 450ms, burst 200ms for 2s after a track change.
-  // Paused → stay on sprite 0.
+  // Pose cycling: 150 ms always. Paused → freeze on pose 1 of current group.
   useEffect(() => {
-    if (!mascotReady) return;
+    if (validGroups.length === 0) return;
     if (!playing) {
-      setspriteIndex(0);
+      setPoseIndex(0);
       return;
     }
     let cancelled = false;
+    let timer: number;
     const tick = () => {
       if (cancelled) return;
-      setspriteIndex((p) => (p + 1) % MASCOT_COUNT);
-      const bursting = Date.now() < burstUntilRef.current;
-      const delay = bursting ? 200 : 450;
-      timer = window.setTimeout(tick, delay);
+      setPoseIndex((p) => (p + 1) % POSES_PER_GROUP);
+      timer = window.setTimeout(tick, POSE_INTERVAL_MS);
     };
-    let timer = window.setTimeout(tick, 450);
+    timer = window.setTimeout(tick, POSE_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [playing, mascotReady]);
+  }, [playing, validGroups.length]);
 
   // Mutable state that outlives re-renders. Kept out of React state to avoid
   // re-rendering 60 times per second.
@@ -99,7 +114,7 @@ export function MusicVisualizer({
     stateRef.current.playing = playing;
   }, [playing]);
 
-  // Tap pulse → flash + 3 bright sparks + instant sprite swap + bounce
+  // Tap pulse → flash + 3 bright sparks + instant pose swap + bounce + spotlight flash
   useEffect(() => {
     const s = stateRef.current;
     if (tapPulse === s.lastTap) return;
@@ -121,24 +136,29 @@ export function MusicVisualizer({
         vy: Math.sin(angle) * speed,
         life: 0,
         maxLife: 70 + Math.random() * 30,
-        hue: 180 + Math.random() * 20, // cyan-ish
+        hue: 180 + Math.random() * 20,
         size: 2.4 + Math.random() * 1.6,
         bright: 1,
         glow: 5,
       });
     }
 
-    // Mascot reaction: instant sprite swap + 200ms bounce
+    // Mascot reaction: instant pose swap + 200ms bounce
     if (tapPulse !== lastTapForMascot.current) {
       lastTapForMascot.current = tapPulse;
-      setspriteIndex((p) => (p + 1) % MASCOT_COUNT);
+      setPoseIndex((p) => (p + 1) % POSES_PER_GROUP);
       setBounce(true);
       if (bounceTimerRef.current) window.clearTimeout(bounceTimerRef.current);
       bounceTimerRef.current = window.setTimeout(() => setBounce(false), 200);
     }
+
+    // Spotlight intensity flash 200ms
+    setSpotFlash(true);
+    if (spotFlashTimerRef.current) window.clearTimeout(spotFlashTimerRef.current);
+    spotFlashTimerRef.current = window.setTimeout(() => setSpotFlash(false), 200);
   }, [tapPulse]);
 
-  // Track change → full-circle burst + mascot burst-mode for 2s
+  // Track change → full-circle particle burst + rotate to next valid group
   useEffect(() => {
     const s = stateRef.current;
     if (trackChange === s.lastTrack) return;
@@ -155,7 +175,8 @@ export function MusicVisualizer({
       const angle = (i / 26) * Math.PI * 2 + Math.random() * 0.2;
       const speed = 2.2 + Math.random() * 1.8;
       s.particles.push({
-        x: cx, y: cy,
+        x: cx,
+        y: cy,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         life: 0,
@@ -169,14 +190,16 @@ export function MusicVisualizer({
 
     if (trackChange !== lastTrackForMascot.current) {
       lastTrackForMascot.current = trackChange;
-      burstUntilRef.current = Date.now() + 2000;
+      setGroupSlot((slot) => slot + 1);
+      setPoseIndex(0);
     }
   }, [trackChange]);
 
-  // Cleanup bounce timer on unmount
+  // Cleanup timers on unmount
   useEffect(() => {
     return () => {
       if (bounceTimerRef.current) window.clearTimeout(bounceTimerRef.current);
+      if (spotFlashTimerRef.current) window.clearTimeout(spotFlashTimerRef.current);
     };
   }, []);
 
@@ -222,11 +245,9 @@ export function MusicVisualizer({
     const render = () => {
       state.t += 1;
 
-      // Fade trail (shorter when paused so the scene dims)
       ctx.fillStyle = state.playing ? 'rgba(7, 11, 24, 0.13)' : 'rgba(7, 11, 24, 0.07)';
       ctx.fillRect(0, 0, cssW, cssH);
 
-      // Particle spawns
       const maxParticles = state.playing ? 110 : 30;
       if (state.particles.length < maxParticles) {
         const every = state.playing ? 2 : 8;
@@ -236,7 +257,6 @@ export function MusicVisualizer({
       const cx = cssW / 2;
       const cy = cssH / 2;
 
-      // Central aurora glow
       const pulse = 0.5 + 0.5 * Math.sin(state.t * 0.03);
       const basePulse = state.playing ? 0.45 + pulse * 0.3 : 0.08;
       const flashBoost = state.tapFlash * 0.4;
@@ -254,11 +274,9 @@ export function MusicVisualizer({
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, cssW, cssH);
 
-      // Decay flashes
       state.tapFlash = Math.max(0, state.tapFlash - 0.08);
       state.trackBurst = Math.max(0, state.trackBurst - 0.015);
 
-      // Update + draw particles (additive glow via source-over with alpha)
       ctx.globalCompositeOperation = 'lighter';
       const pull = state.playing ? 0.020 : 0.006;
       const swirl = state.playing ? 0.022 : 0.008;
@@ -272,7 +290,6 @@ export function MusicVisualizer({
         const dx = cx - p.x;
         const dy = cy - p.y;
         const dist = Math.max(12, Math.hypot(dx, dy));
-        // Gentle gravitational pull + tangential swirl
         p.vx += (dx / dist) * pull;
         p.vy += (dy / dist) * pull;
         p.vx += (-dy / dist) * swirl;
@@ -282,7 +299,6 @@ export function MusicVisualizer({
         p.x += p.vx;
         p.y += p.vy;
 
-        // Kill if it drifts out of view or converges
         if (p.x < -40 || p.x > cssW + 40 || p.y < -40 || p.y > cssH + 40) continue;
 
         const t = p.life / p.maxLife;
@@ -304,14 +320,13 @@ export function MusicVisualizer({
       state.particles = kept;
       ctx.globalCompositeOperation = 'source-over';
 
-      // Bright core bead on top
       if (state.playing || state.tapFlash > 0 || state.trackBurst > 0) {
         const coreR = 9 + pulse * 3 + state.tapFlash * 8 + state.trackBurst * 14;
         const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR * 3);
         const bright = 0.9 + state.tapFlash * 0.1 + state.trackBurst * 0.1;
-        cg.addColorStop(0,   `rgba(255, 255, 255, ${Math.min(1, bright)})`);
-        cg.addColorStop(0.35,`rgba(189, 242, 255, ${bright * 0.6})`);
-        cg.addColorStop(1,   'rgba(56, 225, 255, 0)');
+        cg.addColorStop(0,    `rgba(255, 255, 255, ${Math.min(1, bright)})`);
+        cg.addColorStop(0.35, `rgba(189, 242, 255, ${bright * 0.6})`);
+        cg.addColorStop(1,    'rgba(56, 225, 255, 0)');
         ctx.globalCompositeOperation = 'lighter';
         ctx.fillStyle = cg;
         ctx.beginPath();
@@ -327,15 +342,30 @@ export function MusicVisualizer({
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  const currentGroup =
+    validGroups.length > 0 ? validGroups[groupSlot % validGroups.length] : -1;
+  const mascotSrc = currentGroup >= 0 ? MASCOT_SRCS[currentGroup][poseIndex] : null;
+
   return (
     <div className={`viz-wrap ${playing ? 'viz-wrap--on' : 'viz-wrap--off'}`}>
       <canvas ref={canvasRef} className="viz-canvas" />
-      {mascotReady && (
+
+      {/* 80s disco spotlights — two beams, phase-shifted colours, swinging */}
+      <div
+        className={`viz-spotlight viz-spotlight--1 ${playing ? 'on' : 'off'} ${spotFlash ? 'flash' : ''}`}
+        aria-hidden="true"
+      />
+      <div
+        className={`viz-spotlight viz-spotlight--2 ${playing ? 'on' : 'off'} ${spotFlash ? 'flash' : ''}`}
+        aria-hidden="true"
+      />
+
+      {mascotSrc && (
         <div
           className={`viz-mascot ${playing ? 'viz-mascot--on' : 'viz-mascot--off'} ${bounce ? 'viz-mascot--bounce' : ''}`}
           aria-hidden="true"
         >
-          <img src={MASCOT_SRCS[spriteIndex]} alt="" draggable={false} />
+          <img src={mascotSrc} alt="" draggable={false} />
         </div>
       )}
     </div>

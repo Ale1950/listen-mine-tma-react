@@ -885,14 +885,13 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   aspect-ratio: 560 / 260;
 }
 
-/* Dancing mascot overlay (bottom-center of visualizer) */
+/* Dancing mascot overlay (bottom-left corner of visualizer) */
 .viz-mascot {
   position: absolute;
-  left: 50%;
-  bottom: 6px;
+  left: 10px;
+  bottom: 5px;
   width: 110px;
   height: 110px;
-  transform: translateX(-50%);
   pointer-events: none;
   z-index: 2;
   animation: viz-mascot-sway 1s ease-in-out infinite alternate;
@@ -919,8 +918,8 @@ a.btn { display: block; text-align: center; text-decoration: none; }
   transform: scale(1.1);
 }
 @keyframes viz-mascot-sway {
-  from { transform: translateX(calc(-50% - 5px)); }
-  to   { transform: translateX(calc(-50% + 5px)); }
+  from { transform: translateX(-5px); }
+  to   { transform: translateX(5px); }
 }
 @keyframes viz-mascot-glow {
   0%, 100% {
@@ -931,6 +930,70 @@ a.btn { display: block; text-align: center; text-decoration: none; }
     filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.55))
             drop-shadow(0 0 18px rgba(255, 42, 138, 0.55));
   }
+}
+
+/* 80s disco spotlights — two cones emerging from left side, mid-height,
+   pointing diagonally down toward the dancer. Phase-shifted colour cycle
+   and gentle swing ±10°. */
+.viz-spotlight {
+  position: absolute;
+  left: 0;
+  width: 300px;
+  height: 160px;
+  pointer-events: none;
+  z-index: 3;
+  mix-blend-mode: screen;
+  transform-origin: 0 50%;
+  opacity: 0;
+  transition: opacity 0.8s ease, filter 0.18s ease;
+  clip-path: polygon(0 45%, 0 55%, 100% 0, 100% 100%);
+  will-change: transform, background, opacity;
+}
+.viz-spotlight.on {
+  opacity: 0.8;
+}
+.viz-spotlight.off {
+  opacity: 0;
+}
+.viz-spotlight.flash {
+  filter: brightness(1.8) saturate(1.35);
+  opacity: 1;
+}
+.viz-spotlight--1 {
+  top: 30%;
+  animation: viz-spot-swing-1 2.6s ease-in-out infinite alternate,
+             viz-spot-color-1 6s linear infinite;
+}
+.viz-spotlight--2 {
+  top: 50%;
+  animation: viz-spot-swing-2 2.2s ease-in-out infinite alternate,
+             viz-spot-color-2 6s linear infinite;
+}
+@keyframes viz-spot-swing-1 {
+  from { transform: rotate(22deg); }
+  to   { transform: rotate(42deg); }
+}
+@keyframes viz-spot-swing-2 {
+  from { transform: rotate(38deg); }
+  to   { transform: rotate(58deg); }
+}
+@keyframes viz-spot-color-1 {
+  0%   { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
+  16%  { background: linear-gradient(to right, rgba(80, 120, 255, 0.75), rgba(80, 120, 255, 0)); }
+  33%  { background: linear-gradient(to right, rgba(200, 80, 255, 0.75), rgba(200, 80, 255, 0)); }
+  50%  { background: linear-gradient(to right, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
+  66%  { background: linear-gradient(to right, rgba(60, 255, 120, 0.75), rgba(60, 255, 120, 0)); }
+  83%  { background: linear-gradient(to right, rgba(255, 90, 180, 0.75), rgba(255, 90, 180, 0)); }
+  100% { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
+}
+@keyframes viz-spot-color-2 {
+  0%   { background: linear-gradient(to right, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
+  16%  { background: linear-gradient(to right, rgba(60, 255, 120, 0.75), rgba(60, 255, 120, 0)); }
+  33%  { background: linear-gradient(to right, rgba(255, 90, 180, 0.75), rgba(255, 90, 180, 0)); }
+  50%  { background: linear-gradient(to right, rgba(255, 50, 50, 0.75), rgba(255, 50, 50, 0)); }
+  66%  { background: linear-gradient(to right, rgba(80, 120, 255, 0.75), rgba(80, 120, 255, 0)); }
+  83%  { background: linear-gradient(to right, rgba(200, 80, 255, 0.75), rgba(200, 80, 255, 0)); }
+  100% { background: linear-gradient(to right, rgba(255, 230, 60, 0.75), rgba(255, 230, 60, 0)); }
 }
 
 /* Legacy layered-rings visualiser (kept temporarily as a harmless fallback). */
